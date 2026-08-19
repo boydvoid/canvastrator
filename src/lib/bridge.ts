@@ -25,6 +25,8 @@ export const sendTurn = (req: {
   effort: Effort | null
   permission: Permission
   mcpServers: McpServer[]
+  /** Absolute paths; how images reach a CLI, which takes no image bytes. */
+  images: string[]
 }) => invoke<string>('send_turn', { req })
 
 export const interruptSession = (sessionId: string) =>
@@ -50,6 +52,32 @@ export const readBinaryBase64 = (path: string, maxBytes: number) =>
   invoke<{ base64: string; bytes: number }>('read_binary_base64', { path, maxBytes })
 
 export const fileExists = (path: string) => invoke<boolean>('file_exists', { path })
+
+export type FileStamp = { bytes: number; mtimeMs: number }
+
+/**
+ * Size and mtime, or `null` when the path isn't there. For a file whose
+ * contents never enter the app — an image goes to the provider by path — this
+ * is the only thing there is to digest, and the null doubles as the existence
+ * check.
+ */
+export const fileStamp = (path: string) => invoke<FileStamp | null>('file_stamp', { path })
+
+/**
+ * Park a pasted image under the system temp dir and hand back its absolute
+ * path. Never inside the user's repo: a stray PNG there shows up in `git
+ * status` and in the agent's own file listings.
+ */
+export const writeSessionImage = (sessionId: string, base64: string, mime: string) =>
+  invoke<string>('write_session_image', { sessionId, base64, mime })
+
+/** Drop one pasted image: the thumbnail was removed, or the paste was never sent. */
+export const removeSessionImage = (sessionId: string, path: string) =>
+  invoke<void>('remove_session_image', { sessionId, path })
+
+/** Drop a session's pasted images. Its node is gone; nothing will resume onto them. */
+export const clearSessionImages = (sessionId: string) =>
+  invoke<void>('clear_session_images', { sessionId })
 
 /** Skills the user already has installed, for any provider. */
 export const discoverSkills = (cwd: string | null) =>

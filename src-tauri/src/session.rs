@@ -11,7 +11,7 @@ use tokio::process::{Child, Command};
 use crate::env;
 use crate::mcp::McpServer;
 use crate::event::{AgentEvent, SessionEvent};
-use crate::providers::{Effort, Permission, Provider};
+use crate::providers::{Effort, Permission, Provider, TurnArgs};
 
 pub const EVENT_CHANNEL: &str = "session://event";
 
@@ -34,6 +34,10 @@ pub struct TurnRequest {
     /// invocation, so the user's own config is never touched.
     #[serde(default)]
     pub mcp_servers: Vec<McpServer>,
+    /// Absolute paths of images this turn carries — pasted into the composer,
+    /// or image file nodes wired into the session.
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 #[derive(Default)]
@@ -76,14 +80,15 @@ pub async fn run_turn(
 
     let turn_id = uuid::Uuid::new_v4().to_string();
     let mcp_config = crate::mcp::config_json(&req.mcp_servers);
-    let args = req.provider.args(
-        &req.prompt,
-        req.resume.as_deref(),
-        req.model.as_deref(),
-        req.permission,
-        req.effort,
-        mcp_config.as_deref(),
-    );
+    let args = req.provider.args(&TurnArgs {
+        prompt: &req.prompt,
+        resume: req.resume.as_deref(),
+        model: req.model.as_deref(),
+        perm: req.permission,
+        effort: req.effort,
+        mcp_config: mcp_config.as_deref(),
+        images: &req.images,
+    });
 
     if !std::path::Path::new(&req.cwd).is_dir() {
         return Err(format!("working directory does not exist: {}", req.cwd));

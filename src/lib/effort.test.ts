@@ -70,7 +70,7 @@ describe('setEffort', () => {
   it('stops and re-runs the turn it interrupts', async () => {
     useStore.getState().setEffort('s1', 'high')
 
-    expect(useStore.getState().restarting.s1).toBe('refactor the parser')
+    expect(useStore.getState().restarting.s1.text).toBe('refactor the parser')
     await settle()
     expect(calls.interrupts).toEqual(['sess_1'])
 

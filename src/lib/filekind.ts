@@ -3,6 +3,22 @@ export type FileKind = 'image' | 'code' | 'text' | 'pdf' | 'binary'
 
 const IMAGE = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif', 'svg'])
 
+/**
+ * The subset a CLI will take as an image attachment.
+ *
+ * Narrower than `IMAGE`, which is about what the app can *render* — a browser
+ * draws an SVG or a favicon happily, and neither reaches an agent that way.
+ * An SVG is markup, and is far more use to an agent as text it can read and
+ * edit than as an attachment none of the three CLIs will rasterise. An `.ico`
+ * is a genuine binary, but a multi-resolution container none of them decode
+ * either, so it goes down the same path and arrives as a stated-but-unread
+ * binary rather than as a silently ignored image.
+ */
+const ATTACHABLE = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif'])
+
+/** Whether this file can be handed to a provider as an image, by path. */
+export const attachableImage = (path: string) => ATTACHABLE.has(extensionOf(path))
+
 /** Extensions that get plain textarea treatment rather than a code editor. */
 const PLAIN = new Set(['txt', 'log', 'text', 'csv', 'tsv'])
 

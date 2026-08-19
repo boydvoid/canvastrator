@@ -115,6 +115,29 @@ describe('serializeCanvas', () => {
   })
 })
 
+describe('orchestra preferences', () => {
+  it('round-trips what the user set', () => {
+    const orchestra = { provider: 'codex' as const, heavy: 'gpt-5', mid: null, light: null }
+    const back = deserializeCanvas(serializeCanvas({ ...snapshot([]), orchestra }))
+    expect(back.orchestra).toEqual(orchestra)
+  })
+
+  it('opens a canvas saved before it existed with no preference', () => {
+    const back = deserializeCanvas({ ...serializeCanvas(snapshot([])), orchestra: undefined })
+    expect(back.orchestra).toEqual({ provider: null, heavy: null, mid: null, light: null })
+  })
+
+  it('drops a provider the app does not have', () => {
+    // A provider this build has never heard of, as a hand-edited file would
+    // carry it — hence the cast through unknown.
+    const data = {
+      ...serializeCanvas(snapshot([])),
+      orchestra: { provider: 'gemini' },
+    } as unknown as CanvasData
+    expect(deserializeCanvas(data).orchestra?.provider).toBeNull()
+  })
+})
+
 describe('deserializeCanvas', () => {
   it('round-trips a canvas', () => {
     const before = {
@@ -198,5 +221,29 @@ describe('plans across a save', () => {
       plan: { fromNodeId: 'a', goal: '', proposedAt: 0, steps: [] },
     })
     expect(back.plan).toBeNull()
+  })
+})
+
+describe('image attachments on a message', () => {
+  const withImages = [
+    { id: 'm1', role: 'user' as const, text: 'what is wrong', tools: [], images: ['/tmp/a.png'] },
+    { id: 'm2', role: 'assistant' as const, text: 'the margin', tools: [] },
+  ]
+
+  it('survives the round trip, and only where it was set', () => {
+    const data = serializeCanvas(snapshot([session('a', { messages: withImages })]))
+    const back = deserializeCanvas(data).nodes[0]
+    const messages = back.type === 'session' ? back.data.messages : []
+    expect(messages[0].images).toEqual(['/tmp/a.png'])
+    expect('images' in messages[1]).toBe(false)
+  })
+
+  /** Every canvas saved before images existed is one of these. */
+  it('loads a canvas whose messages predate the field', () => {
+    const messages = [{ id: 'm1', role: 'user' as const, text: 'hello', tools: [] }]
+    const back = deserializeCanvas(serializeCanvas(snapshot([session('a', { messages })]))).nodes[0]
+    const loaded = back.type === 'session' ? back.data.messages : []
+    expect(loaded).toEqual(messages)
+    expect(loaded[0].images).toBeUndefined()
   })
 })

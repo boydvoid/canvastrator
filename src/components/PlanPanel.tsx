@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Check, CircleAlert, Loader2, Play, Trash2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { fansOut, MAX_FANOUT, pattern as patternOf } from '@/lib/patterns'
 import { planLive } from '@/lib/plan'
 import { useStore } from '@/lib/store'
 import type { Plan, PlanStep } from '@/lib/types'
@@ -102,6 +103,11 @@ export function PlanPanel({ plan }: { plan: Plan }) {
   const pending = plan.steps.filter((s) => s.state === 'pending').length
   const busy = plan.steps.some((s) => s.state === 'running')
   const live = planLive(plan.steps)
+  const shape = plan.pattern ? patternOf(plan.pattern.id) : null
+  // A plan whose shape and length disagree has already lost the right to fan
+  // out, so the panel must not go on promising that it will.
+  const parallel = fansOut(plan.pattern?.id) && !plan.warning
+  const waves = parallel && pending > MAX_FANOUT
 
   return (
     <div className="shrink-0 border-b border-line-soft bg-surface/30">
@@ -121,7 +127,46 @@ export function PlanPanel({ plan }: { plan: Plan }) {
 
       {open && (
         <div className="px-2.5 pb-2">
-          <ol className="space-y-1">
+          {/* The list scrolls rather than the panel growing. A plan of any
+              length otherwise pushed the transcript out of the dock and then
+              ran off the bottom of it, where the last steps could not be read
+              at all — and those are the ones still waiting to be approved.
+              Capped rather than flexed because the panel sits in a column of
+              shrink-0 siblings: a share of the viewport is the only height it
+              can know here, and it leaves the transcript the majority. */}
+          {/* The shape it chose, and why — shown where the plan is approved,
+              because that is the decision being approved. A list of steps
+              hides the difference between "these four run one after another"
+              and "these four all start now", and the second is the one that
+              spends four agents' worth of tokens in one go. */}
+          {shape && (
+            <p className="mb-1.5 rounded-md border border-line px-2 py-1.5 font-mono text-[10px] leading-relaxed text-fg-muted">
+              <span className="text-fg">{shape.name}</span>
+              <span className="text-fg-faint">
+                {' '}
+                ·{' '}
+                {parallel
+                  ? waves
+                    ? `steps run at once, ${MAX_FANOUT} at a time`
+                    : 'steps run at once'
+                  : 'steps run in order'}{' '}
+                · {shape.cost}
+              </span>
+              {plan.pattern?.why && <span className="block text-fg-subtle">{plan.pattern.why}</span>}
+            </p>
+          )}
+
+          {/* The shape it claimed against the plan it wrote. Shown even though
+              the app has already acted on it, because the demotion changes
+              what approving this costs and how long it takes — and because a
+              shape that keeps being wrong is worth the user seeing twice. */}
+          {plan.warning && (
+            <p className="mb-1.5 rounded-md border border-[color-mix(in_oklch,var(--color-danger)_35%,transparent)] px-2 py-1.5 font-mono text-[10px] leading-relaxed text-fg-muted">
+              {plan.warning}
+            </p>
+          )}
+
+          <ol className="max-h-[40vh] space-y-1 overflow-y-auto overscroll-contain">
             {plan.steps.map((step, i) => (
               <Step key={step.id} step={step} index={i} busy={busy} />
             ))}
@@ -133,9 +178,15 @@ export function PlanPanel({ plan }: { plan: Plan }) {
                 onClick={() => void approveAll()}
                 disabled={busy || !pending}
                 className="rounded bg-surface-3 px-2 py-1 font-mono text-[10.5px] text-fg hover:bg-surface-2 disabled:opacity-40"
-                title="Run every remaining step, in order"
+                title={
+                  parallel
+                    ? 'Start every remaining step at the same time'
+                    : 'Run every remaining step, in order'
+                }
               >
-                {busy ? 'running…' : `approve ${pending === plan.steps.length ? 'plan' : 'rest'}`}
+                {busy
+                  ? 'running…'
+                  : `approve ${pending === plan.steps.length ? 'plan' : 'rest'}${parallel ? ' ⇉' : ''}`}
               </button>
             )}
             <button

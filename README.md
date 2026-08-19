@@ -46,6 +46,7 @@ the agent runs.
 | **Persona library** | A right sidebar of reusable agent archetypes, saved to disk outside any canvas. Every orchestrator can spawn them; spawning one drops its node onto the canvas. Ships with reviewer / implementer / investigator / researcher. |
 | **Personality nodes** | Named agent archetypes — provider, model, permission tier, and an opening brief. Wire one into an orchestrator and that orchestrator may instantiate it on demand. |
 | **Orchestrator spawns children** | `SPAWN <personality>: <task>` creates a real new session in the same folder, wired for context both ways, runs the task, and reports back. |
+| **Shape before spawn** | The orchestrator declares which of six orchestration shapes the job has — single agent, chain, routing, parallel, orchestrator-worker, evaluator-optimizer — cheapest that fits, and says why not the cheaper one. The plan panel shows the choice, and a plan that says its steps are independent actually runs them at once. |
 | **Spawn policy via skills** | A skill on the orchestrator says *when* to spawn — "if the user asks for a poem, spawn the haiku-writer" — so routing is something you define, not something hardcoded. |
 | **Agent → agent delegation** | The orchestrator can hand a task to another agent, get the answer back, and continue. Hop-limited. |
 | **Skill nodes** | Write instructions, pick a trigger, wire to a session; they're injected into that agent. |
@@ -76,6 +77,29 @@ This is far cheaper than the design notes originally assumed.
 Each turn is a **fresh process**. The conversation lives in the CLI's own store and is
 picked back up by id. Simpler and more robust than holding a long-lived interactive
 process, at the cost of per-turn startup.
+
+### Choosing the shape of a job
+
+A canvas of agents makes fan-out the easy move, and that is the trap: a squad
+can spend an order of magnitude more tokens than one agent doing the same job.
+So the orchestrator is made to choose first, from a ladder of six shapes with
+the cost of each rung stated (`src/lib/patterns.ts`), and open its reply with:
+
+```
+PATTERN parallel: the three reviews never read each other's output.
+PLAN reviewer: …
+```
+
+The declaration is read, not just displayed. `parallel` is the one shape whose
+steps do not read each other, so approving that plan starts every pending step
+at once and feeds all of their reports back in **one** orchestrator turn rather
+than one turn each. Every other shape runs a step at a time, in order, each
+seeing what the last one produced — which is also what a plan with no
+declaration does, because in-order is the reading that can't be wrong.
+
+Two ceilings live in the app rather than in the prompt: a plan stops growing at
+24 steps, and spawn depth, children per agent, and sessions per canvas are
+capped as before. "Revise until it's good" has no end that the model pays for.
 
 ### Layout
 

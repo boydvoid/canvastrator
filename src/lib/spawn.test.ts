@@ -189,14 +189,14 @@ describe('sending to a busy session', () => {
     const { useStore } = await import('./store')
     useStore.setState({ nodes: [session('a', 'streaming')] as never, queued: {} })
     await useStore.getState().send('a', 'while streaming')
-    expect(useStore.getState().queued.a).toEqual(['while streaming'])
+    expect(useStore.getState().queued.a).toEqual([{ text: 'while streaming', images: [] }])
   })
 
   it('holds a message typed while the agent is thinking', async () => {
     const { useStore } = await import('./store')
     useStore.setState({ nodes: [session('a', 'thinking')] as never, queued: {} })
     await useStore.getState().send('a', 'while thinking')
-    expect(useStore.getState().queued.a).toEqual(['while thinking'])
+    expect(useStore.getState().queued.a).toEqual([{ text: 'while thinking', images: [] }])
   })
 
   it('keeps several in the order they were typed', async () => {
@@ -204,7 +204,7 @@ describe('sending to a busy session', () => {
     useStore.setState({ nodes: [session('a', 'streaming')] as never, queued: {} })
     await useStore.getState().send('a', 'first')
     await useStore.getState().send('a', 'second')
-    expect(useStore.getState().queued.a).toEqual(['first', 'second'])
+    expect(useStore.getState().queued.a.map((q) => q.text)).toEqual(['first', 'second'])
   })
 
   it('queues per session, not globally', async () => {
@@ -215,6 +215,7 @@ describe('sending to a busy session', () => {
     })
     await useStore.getState().send('a', 'for a')
     await useStore.getState().send('b', 'for b')
-    expect(useStore.getState().queued).toEqual({ a: ['for a'], b: ['for b'] })
+    expect(useStore.getState().queued.a.map((q) => q.text)).toEqual(['for a'])
+    expect(useStore.getState().queued.b.map((q) => q.text)).toEqual(['for b'])
   })
 })

@@ -2,6 +2,7 @@ mod canvas;
 mod diff;
 mod env;
 mod event;
+mod images;
 mod library;
 mod mcp;
 mod migrate;
@@ -187,7 +188,7 @@ struct BinaryFile {
 }
 
 /// Small standalone base64 encoder — not worth a dependency for one call site.
-fn b64(input: &[u8]) -> String {
+pub(crate) fn b64(input: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
@@ -212,6 +213,36 @@ fn file_exists(path: String) -> bool {
     std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false)
 }
 
+/// Size and modification time of a file, or nothing when it isn't there.
+///
+/// For change detection on a file whose contents never pass through the app —
+/// an image goes to the provider by path, so there is no text to digest, but a
+/// screenshot re-saved over the same path still has to count as new.
+#[tauri::command]
+fn file_stamp(path: String) -> Option<FileStamp> {
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some(FileStamp {
+        bytes: meta.len(),
+        mtime_ms,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileStamp {
+    bytes: u64,
+    mtime_ms: u64,
+}
+
 /// Guard against a folder node pointing somewhere that no longer exists.
 #[tauri::command]
 fn dir_exists(path: String) -> bool {
@@ -228,6 +259,9 @@ pub fn run() {
             // Before anything reads the data dir: a rename must not strand the
             // user's canvases under the old bundle identifier.
             migrate::migrate_legacy_data(app.handle());
+            // Session image dirs whose nodes were deleted while the app was
+            // closed have nothing left to clean them up but this.
+            images::sweep_stale_images();
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
@@ -245,8 +279,12 @@ pub fn run() {
             read_text_file,
             write_text_file,
             read_binary_base64,
+            images::write_session_image,
+            images::remove_session_image,
+            images::clear_session_images,
             dir_exists,
             file_exists,
+            file_stamp,
             canvas::list_canvases,
             canvas::load_canvas,
             canvas::save_canvas,

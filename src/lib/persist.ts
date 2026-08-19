@@ -1,7 +1,16 @@
 import type { Edge } from '@xyflow/react'
 import { SESSION_SIZE } from './layout'
 import { reconcileFolderEdges, type GtNode } from './store'
-import type { ContextEntry, Message, Notification, PersonalityNodeData, Plan } from './types'
+import {
+  DEFAULT_ORCHESTRA,
+  MODEL_TIERS,
+  type ContextEntry,
+  type Message,
+  type Notification,
+  type OrchestraPrefs,
+  type PersonalityNodeData,
+  type Plan,
+} from './types'
 
 /** Bumped when the saved shape changes in a way older files can't satisfy. */
 export const CANVAS_VERSION = 1
@@ -47,6 +56,8 @@ export type CanvasData = {
   notifications?: Notification[]
   /** Whether the orchestrator proposes work rather than starting it. */
   planning?: boolean
+  /** Which models the user wants this canvas's orchestrator reaching for. */
+  orchestra?: OrchestraPrefs
   /** A plan the user hasn't finished with. */
   plan?: Plan | null
 }
@@ -63,6 +74,12 @@ export type CanvasSnapshot = {
   notifications: Notification[]
   planning: boolean
   plan: Plan | null
+  /**
+   * Optional so a caller that predates the preference — the tests, and any
+   * partial snapshot — still type-checks; absent saves as "no preference",
+   * which is what an untouched canvas means anyway.
+   */
+  orchestra?: OrchestraPrefs
 }
 
 /**
@@ -132,6 +149,7 @@ export function serializeCanvas(s: CanvasSnapshot): CanvasData {
     globalRules: s.globalRules ?? '',
     notifications: s.notifications ?? [],
     planning: s.planning ?? true,
+    orchestra: { ...DEFAULT_ORCHESTRA, ...(s.orchestra ?? {}) },
     // A step that was mid-flight when the app closed is pending again: its
     // agent is gone with the process, and a step stuck on "running" for ever
     // is worse than one the user has to approve twice.
@@ -165,6 +183,19 @@ export function strandedPersonas(data: CanvasData | null | undefined): Personali
     .filter((n) => (n?.type as string) === 'personality' && n.data && typeof n.data === 'object')
     .map((n) => n.data as PersonalityNodeData)
     .filter((d) => typeof d.name === 'string' && d.name.trim() !== '')
+}
+
+/** Only the fields still recognised, and only when they are strings. */
+function readOrchestra(raw: OrchestraPrefs | undefined): OrchestraPrefs {
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : null)
+  const provider = str(raw?.provider)
+  return {
+    provider: provider === 'claude' || provider === 'codex' || provider === 'opencode' ? provider : null,
+    ...(Object.fromEntries(MODEL_TIERS.map((t) => [t, str(raw?.[t])])) as Record<
+      (typeof MODEL_TIERS)[number],
+      string | null
+    >),
+  }
 }
 
 export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSnapshot {
@@ -233,6 +264,10 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
     // those too: the mode is about what the *next* turn does, and a canvas
     // that opens ready to run unattended is the surprise, not the other way.
     planning: data?.planning ?? true,
+    // Field by field, not spread wholesale: a hand-edited or older file may
+    // carry a tier that is no longer offered, and a preference must never put
+    // a value the pickers cannot show back into the store.
+    orchestra: readOrchestra(data?.orchestra),
     plan:
       data?.plan && Array.isArray(data.plan.steps) && data.plan.steps.length
         ? {

@@ -5,6 +5,8 @@ import {
   filesKnownBlock,
   filesKnownEntry,
   filesKnownKey,
+  orchestraBlock,
+  orchestraKey,
   orchestratorBlock,
   peerKey,
   peersBlock,
@@ -15,6 +17,7 @@ import {
   type GtNode,
 } from './store'
 import type { Persona } from './library'
+import { DEFAULT_ORCHESTRA } from './types'
 
 const persona = (over: Partial<Persona> = {}): Persona => ({
   id: 'p1',
@@ -119,6 +122,33 @@ describe('orchestratorBlock', () => {
   it('lists the roster it was given', () => {
     expect(orchestratorBlock([persona({ name: 'api-critic' })], false)).toContain('api-critic')
     expect(orchestratorBlock([], false)).toContain('(none yet)')
+  })
+
+  it('carries a model preference only when one is set', () => {
+    expect(orchestratorBlock([persona()], false)).not.toContain('canvastrator-model-preference')
+    expect(
+      orchestratorBlock([persona()], false, { ...DEFAULT_ORCHESTRA, heavy: 'claude-opus-5' }),
+    ).toContain('canvastrator-model-preference')
+  })
+})
+
+describe('orchestraBlock', () => {
+  it('says nothing when the user has expressed no preference', () => {
+    expect(orchestraBlock(DEFAULT_ORCHESTRA)).toBe('')
+  })
+
+  it('names only the fields that are set', () => {
+    const block = orchestraBlock({ ...DEFAULT_ORCHESTRA, provider: 'codex', light: 'gpt-5' })
+    expect(block).toContain('Spawn on codex')
+    expect(block).toContain('gpt-5')
+    expect(block).not.toContain('architecture')
+  })
+
+  it('moves its key when any field changes, so a briefed agent is told again', () => {
+    const base = { ...DEFAULT_ORCHESTRA, heavy: 'claude-opus-5' }
+    expect(orchestraKey(base)).toBe(orchestraKey({ ...base }))
+    expect(orchestraKey(base)).not.toBe(orchestraKey({ ...base, mid: 'claude-sonnet-5' }))
+    expect(orchestraKey(base)).not.toBe(orchestraKey(DEFAULT_ORCHESTRA))
   })
 })
 

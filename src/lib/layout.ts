@@ -81,6 +81,9 @@ export const SESSION_SIZE = { w: 260, h: 106 }
 /** A file is a chip. There are a lot of them, and they stack. */
 export const FILE_SIZE = { w: 196, h: 38 }
 
+/** The usage panel. Wide enough for a name, a meter and two numbers per row. */
+export const USAGE_SIZE = { w: 300, h: 180 }
+
 /** Fallback sizes for nodes React Flow hasn't measured yet. */
 const DEFAULT_SIZE: Record<GtNode['type'], { w: number; h: number }> = {
   session: SESSION_SIZE,
@@ -89,6 +92,7 @@ const DEFAULT_SIZE: Record<GtNode['type'], { w: number; h: number }> = {
   skill: { w: 240, h: 190 },
   mcp: { w: 240, h: 150 },
   mcptool: { w: 208, h: 52 },
+  usage: USAGE_SIZE,
 }
 
 export const sizeOf = (n: GtNode) => ({

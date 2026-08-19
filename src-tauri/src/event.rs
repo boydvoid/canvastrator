@@ -46,6 +46,16 @@ pub enum AgentEvent {
         cost_usd: Option<f64>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        /// Everything the model read to produce this turn: fresh input plus
+        /// whatever came from cache.
+        ///
+        /// Distinct from `input_tokens`, which is what was *billed at full
+        /// rate* — on a cached conversation that is a few hundred tokens while
+        /// the real prompt is a hundred thousand. Accumulating input_tokens
+        /// answers "what did this cost"; this field answers "how full is the
+        /// context window", and the two diverge by orders of magnitude the
+        /// moment prompt caching is doing its job.
+        context_tokens: Option<u64>,
     },
     /// Something went wrong; the turn is over.
     Failed { message: String },

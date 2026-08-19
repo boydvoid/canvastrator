@@ -1,3 +1,5 @@
+import type { PatternChoice } from './patterns'
+
 export type Provider = 'claude' | 'codex' | 'opencode'
 export type Role = 'orchestrator' | 'worker'
 
@@ -6,6 +8,9 @@ export type Role = 'orchestrator' | 'worker'
  * permission prompt, so this must be set explicitly or every edit is refused.
  */
 export type Permission = 'plan' | 'auto' | 'full'
+
+/** The three, in the order the pickers cycle and list them. */
+export const PERMISSIONS: Permission[] = ['plan', 'auto', 'full']
 
 export const PERMISSION_LABEL: Record<Permission, string> = {
   plan: 'read-only',
@@ -52,9 +57,19 @@ export type ModelOption = {
    * from a vendor we cannot rank against the others, say. Readers must cope
    * with it being unset rather than assume list order means anything.
    */
-  tier?: 'heavy' | 'mid' | 'light'
+  tier?: ModelTier
   /** Short note on a model whose character the tier does not capture. */
   note?: string
+  /**
+   * How many tokens fit in this model's context window.
+   *
+   * Omitted where we have no authority for a number, which is most of the
+   * opencode list — those ids point at whatever the user's own config resolves
+   * them to. An omitted window is drawn as an unknown one, never guessed: a
+   * meter that invents a denominator is worse than a meter that admits it does
+   * not have one, because only the first is believed.
+   */
+  context?: number
 }
 
 /**
@@ -75,10 +90,17 @@ export const MODEL_OPTIONS: Record<Provider, ModelOption[]> = {
       id: 'claude-fable-5',
       label: 'Fable 5',
       note: 'built for creative and natural-language work, not raw reasoning depth',
+      context: 1_000_000,
     },
-    { id: 'claude-opus-5', label: 'Opus 5', tier: 'heavy' },
-    { id: 'claude-sonnet-5', label: 'Sonnet 5', tier: 'mid' },
-    { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', tier: 'light' },
+    { id: 'claude-opus-5', label: 'Opus 5', tier: 'heavy', context: 1_000_000 },
+    { id: 'claude-sonnet-5', label: 'Sonnet 5', tier: 'mid', context: 1_000_000 },
+    {
+      id: 'claude-haiku-4-5-20251001',
+      label: 'Haiku 4.5',
+      tier: 'light',
+      // The one current Claude model still on a 200K window.
+      context: 200_000,
+    },
   ],
   // The two presets the codex CLI ships with. It forwards anything else
   // straight to the API, which is why the field is not a closed list.
@@ -117,11 +139,53 @@ export const MODEL_OPTIONS: Record<Provider, ModelOption[]> = {
   ],
 }
 
+/**
+ * The context window for a session, or null when we cannot say.
+ *
+ * Null is a real answer here and gets its own treatment in the UI. A session
+ * on the CLI's default model has not told us which model that is, and an
+ * opencode id resolves through the user's own config — inventing 200K for
+ * either would put a confident denominator under a number that has none.
+ */
+export function contextLimit(provider: Provider, model?: string): number | null {
+  if (!model) return null
+  return (MODEL_OPTIONS[provider] ?? []).find((m) => m.id === model)?.context ?? null
+}
+
 /** What to type here, per provider. Shown when the field is empty. */
 export const MODEL_HINT: Record<Provider, string> = {
   claude: 'a model id or alias, e.g. opus — blank for the CLI default',
   codex: 'a model id your codex CLI accepts — blank for the CLI default',
   opencode: 'provider/model, as `opencode models` lists it — blank for default',
+}
+
+/** The tiers a model can be preferred for, in the order they are offered. */
+export const MODEL_TIERS = ['heavy', 'mid', 'light'] as const
+
+export type ModelTier = (typeof MODEL_TIERS)[number]
+
+/**
+ * What the user wants the orchestrator reaching for when it invents a persona.
+ *
+ * The tier mapping in the orchestrator's brief is written from
+ * `MODEL_OPTIONS`, which says what each tier is *for* — it cannot say which of
+ * two heavy models this user is willing to pay for. That is a preference, not
+ * a fact about the models, so it lives here and is set from the chatbox rather
+ * than baked into the brief.
+ *
+ * Every field is nullable and null means "no preference": an unset canvas must
+ * leave the orchestrator exactly the latitude it had before this existed.
+ */
+export type OrchestraPrefs = {
+  /** The provider new agents should be spawned on, or null to let it choose. */
+  provider: Provider | null
+} & Record<ModelTier, string | null>
+
+export const DEFAULT_ORCHESTRA: OrchestraPrefs = {
+  provider: null,
+  heavy: null,
+  mid: null,
+  light: null,
 }
 
 /**
@@ -162,6 +226,8 @@ export type AgentEvent =
       costUsd: number | null
       inputTokens: number | null
       outputTokens: number | null
+      /** The whole prompt this turn read, cache included. See `event.rs`. */
+      contextTokens: number | null
     }
   | { kind: 'failed'; message: string }
   | { kind: 'exited'; code: number }
@@ -178,6 +244,12 @@ export type Message = {
   role: 'user' | 'assistant' | 'system'
   text: string
   tools: { name: string; detail: string }[]
+  /**
+   * Absolute paths of images sent with this message. Optional, and written
+   * only when there are any — canvases saved before images existed must still
+   * load, and a message without the field is simply a message without images.
+   */
+  images?: string[]
   /** Set while the assistant message is still being streamed into. */
   pending?: boolean
   error?: boolean
@@ -210,6 +282,22 @@ export type PlanStep = {
 export type Plan = {
   /** The orchestrator that wrote it. */
   fromNodeId: string
+  /**
+   * The shape it chose, and why.
+   *
+   * Optional because a plan written before the ladder existed, or by an agent
+   * that skipped the line, is still a plan — it just runs in order, which is
+   * what every shape but a fan-out does anyway.
+   */
+  pattern?: PatternChoice
+  /**
+   * Set when the shape it declared and the plan it wrote disagree.
+   *
+   * Kept on the plan rather than only shown once, because it is the reason the
+   * plan will run in order despite what its shape says — and a user reading
+   * the panel an hour later deserves that reason, not a silent demotion.
+   */
+  warning?: string
   /** What was asked for, so the plan still makes sense hours later. */
   goal: string
   steps: PlanStep[]
@@ -290,10 +378,30 @@ export type SessionNodeData = {
   providerSessionId?: string
   messages: Message[]
   usage: { costUsd: number; inputTokens: number; outputTokens: number }
+  /**
+   * How much context the last turn carried.
+   *
+   * The last turn, not a running total: the conversation is resent whole every
+   * turn, so this is the size of the thing itself rather than something to add
+   * up. Absent until a turn reports it, which is why the meter can say
+   * "unknown" rather than "empty".
+   */
+  contextTokens?: number
   skillIds: string[]
   /** Bumped to retrigger the "skill fired" flash. */
   firedAt?: number
 }
+
+/**
+ * The usage panel, as a node.
+ *
+ * It holds no data of its own — every figure on it is read live off the
+ * sessions, the same way a plan step node reads its step. Storing a copy would
+ * create a second version of what a canvas has cost, and the two would disagree
+ * within one turn. The id exists only so the node has an identity to persist
+ * and delete by.
+ */
+export type UsageNodeData = { usageId: string }
 
 /** A directory on the canvas. Wiring it to a session sets that session's cwd. */
 export type FolderNodeData = {

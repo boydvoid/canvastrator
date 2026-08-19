@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils'
 
 export const DropdownMenu = Primitive.Root
 export const DropdownMenuTrigger = Primitive.Trigger
+export const DropdownMenuSub = Primitive.Sub
 
 export function DropdownMenuContent({
   className,
@@ -21,6 +22,42 @@ export function DropdownMenuContent({
         {...props}
       />
     </Primitive.Portal>
+  )
+}
+
+export function DropdownMenuSubContent({
+  className,
+  ...props
+}: React.ComponentProps<typeof Primitive.SubContent>) {
+  return (
+    <Primitive.Portal>
+      <Primitive.SubContent
+        className={cn(
+          'z-50 min-w-40 overflow-hidden rounded-lg border border-line bg-panel/95 p-1 shadow-2xl backdrop-blur',
+          className,
+        )}
+        {...props}
+      />
+    </Primitive.Portal>
+  )
+}
+
+export function DropdownMenuSubTrigger({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<typeof Primitive.SubTrigger>) {
+  return (
+    <Primitive.SubTrigger
+      className={cn(
+        'flex cursor-default select-none items-center justify-between gap-2 rounded px-2 py-1.5 text-xs outline-none data-[highlighted]:bg-surface-2 data-[state=open]:bg-surface-2',
+        className,
+      )}
+      {...props}
+    >
+      {children}
+      <span className="text-fg-subtle">›</span>
+    </Primitive.SubTrigger>
   )
 }
 

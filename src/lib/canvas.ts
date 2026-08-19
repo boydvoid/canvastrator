@@ -7,6 +7,7 @@ import {
   type CanvasMeta,
 } from './persist'
 import { personaFromNode } from './library'
+import { DEFAULT_ORCHESTRA } from './types'
 import { justWentQuiet, playDone } from './chime'
 import { useStore } from './store'
 
@@ -206,6 +207,7 @@ export function newCanvas() {
       canvasDialog: null,
       globalRules: '',
       plan: null,
+      orchestra: { ...DEFAULT_ORCHESTRA },
     }),
   )
 }
@@ -338,7 +340,8 @@ export function watchCanvas(): () => void {
       // A plan is work the user agreed to, or is about to; losing it to a
       // crash would mean reading the orchestrator's reasoning over again.
       s.plan !== seen.plan ||
-      s.planning !== seen.planning
+      s.planning !== seen.planning ||
+      s.orchestra !== seen.orchestra
     seen = s
     if (!changed || loading) return
 

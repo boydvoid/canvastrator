@@ -226,6 +226,47 @@ export function SpawnEdge({
   )
 }
 
+/**
+ * A step of a plan to the next, and the orchestrator into the first.
+ *
+ * Dashed, because nothing here has happened yet: every other wire on the
+ * canvas records something real — a folder attached, a child spawned, a file
+ * touched — and a plan is the one that is still only proposed. A step that has
+ * run keeps its wire, now pointing at the agent it became.
+ */
+export function PlanEdge({
+  id,
+  source,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+}: EdgeProps) {
+  const [path] = getSmoothStepPath({
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    sourcePosition,
+    targetPosition,
+    borderRadius: 12,
+  })
+  const accent = useSourceAccent(source)
+  return (
+    <BaseEdge
+      id={id}
+      path={path}
+      style={{
+        stroke: `color-mix(in oklch, ${accent} 38%, transparent)`,
+        strokeWidth: 1.4,
+        strokeDasharray: '4 4',
+      }}
+    />
+  )
+}
+
 export const edgeTypes = {
   context: ContextEdge,
   attach: AttachEdge,
@@ -234,4 +275,5 @@ export const edgeTypes = {
   spawn: SpawnEdge,
   file: FileEdge,
   mcpuse: AttachEdge,
+  plan: PlanEdge,
 }

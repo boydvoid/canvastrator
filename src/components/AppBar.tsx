@@ -2,6 +2,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { PanelLeftOpen } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { CanvasStatus } from '@/components/CanvasBar'
+import { ContextMeter } from '@/components/ContextMeter'
 import { NotificationBell } from '@/components/NotificationBell'
 import { ThemeSwitch } from '@/components/ThemeSwitch'
 import { useStore } from '@/lib/store'
@@ -149,6 +150,7 @@ export function AppBar({
         >
           auto {autoTidy ? 'on' : 'off'}
         </button>
+        <ContextMeter />
         <NotificationBell />
         <ThemeSwitch />
         <span

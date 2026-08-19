@@ -13,13 +13,17 @@ import { AppBar } from '@/components/AppBar'
 import { PanelDivider } from '@/components/PanelDivider'
 import { Sidebar } from '@/components/Sidebar'
 import { edgeTypes } from '@/components/edges'
+import { planFlow } from '@/lib/plannodes'
 import { FileViewer } from '@/components/FileViewer'
 import { RightDock } from '@/components/RightDock'
+import { CentralChat } from '@/components/CentralChat'
 import { FileNode } from '@/components/nodes/FileNode'
 import { FolderNode } from '@/components/nodes/FolderNode'
 import { McpNode } from '@/components/nodes/McpNode'
 import { McpToolNode } from '@/components/nodes/McpToolNode'
 import { SessionNode } from '@/components/nodes/SessionNode'
+import { PlanStepNode } from '@/components/nodes/PlanStepNode'
+import { UsageNode } from '@/components/nodes/UsageNode'
 import { SkillNode } from '@/components/nodes/SkillNode'
 import {
   ContextMenu,
@@ -46,6 +50,7 @@ import {
   watchCompletion,
   watchLayout,
 } from '@/lib/canvas'
+import { CHAT_PANEL_ENABLED } from '@/lib/flags'
 import { togglePanels, usePanels } from '@/lib/panels'
 import { SHORTCUT_LABEL, keyToCanvasAction, shouldIgnoreShortcut } from '@/lib/shortcuts'
 import { useStore, type GtNode } from '@/lib/store'
@@ -58,11 +63,14 @@ const nodeTypes: NodeTypes = {
   file: FileNode,
   mcp: McpNode,
   mcptool: McpToolNode,
+  planstep: PlanStepNode,
+  usage: UsageNode,
 }
 
 function Surface() {
   const nodes = useStore((s) => s.nodes)
   const edges = useStore((s) => s.edges)
+  const plan = useStore((s) => s.plan)
   const providers = useStore((s) => s.providers)
   const addMcp = useStore((s) => s.addMcp)
   const cwd = useStore((s) => s.cwd)
@@ -78,7 +86,16 @@ function Surface() {
       .then(setMcpAvailable)
       .catch(() => setMcpAvailable([]))
   }, [cwd])
-  const { onNodesChange, onEdgesChange, onConnect, addSession, addSkill, addFolder, addFile } =
+  const {
+    onNodesChange,
+    onEdgesChange,
+    onConnect,
+    addSession,
+    addSkill,
+    addFolder,
+    addFile,
+    addUsage,
+  } =
     useStore.getState()
 
   const wrapper = useRef<HTMLDivElement>(null)
@@ -150,9 +167,19 @@ function Surface() {
     }
   }, [nodes, visibleEdges])
 
+  /**
+   * The plan drawn as the flow it describes, merged in rather than stored.
+   *
+   * Deriving it here keeps the plan the only copy: the panel and the canvas
+   * are two views of one list, and there is no second place for a step's state
+   * to be wrong. It also means nothing to clean up — discarding the plan takes
+   * the nodes with it.
+   */
+  const planned = useMemo(() => planFlow(plan, nodes), [plan, nodes])
+
   const shownNodes = useMemo(
-    () =>
-      focus
+    () => [
+      ...(focus
         ? nodes.map((n) => ({
             ...n,
             className: focus.picked.has(n.id)
@@ -161,19 +188,31 @@ function Surface() {
                 ? 'gt-linked'
                 : 'gt-faded',
           }))
-        : nodes,
-    [nodes, focus],
+        : nodes),
+      // Never dimmed by focus: a step waiting on approval is the thing most
+      // worth seeing, and hiding it behind a selection elsewhere would be the
+      // dropdown problem again in a different shape.
+      //
+      // Cast because a step node is deliberately not a GtNode: GtNode is the
+      // set of things that live in the store and get saved, and these are
+      // neither. Widening the union to admit them would make every persist and
+      // layout path claim to handle a node they must never receive.
+      ...(planned.nodes as unknown as GtNode[]),
+    ],
+    [nodes, focus, planned],
   )
 
   const shownEdges = useMemo(
-    () =>
-      focus
+    () => [
+      ...(focus
         ? visibleEdges.map((e) => ({
             ...e,
             className: focus.edges.has(e.id) ? 'gt-wire-lit' : 'gt-wire-faded',
           }))
-        : visibleEdges,
-    [visibleEdges, focus],
+        : visibleEdges),
+      ...planned.edges,
+    ],
+    [visibleEdges, focus, planned],
   )
 
   useEffect(() => {
@@ -283,9 +322,11 @@ function Surface() {
                   if (node.type !== 'session') return
                   const st = useStore.getState()
                   st.setChatTarget(node.id)
-                  // setRightTab opens the dock, so a click always lands
-                  // somewhere visible even with the panel put away.
-                  st.setRightTab('chat')
+                  // With the dock's chat tab retired the chatbox is always on
+                  // screen, so pointing it at the node is the whole gesture.
+                  // setRightTab opens the dock, so with the panel back the
+                  // click still lands somewhere visible.
+                  if (CHAT_PANEL_ENABLED) st.setRightTab('chat')
                 }}
                 proOptions={{ hideAttribution: true }}
                 minZoom={0.2}
@@ -371,6 +412,9 @@ function Surface() {
               Skill
               <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.skill}</span>
             </ContextMenuItem>
+            <ContextMenuItem onSelect={() => addUsage(screenToFlowPosition(menuAt))}>
+              Usage
+            </ContextMenuItem>
             <ContextMenuSub>
               <ContextMenuSubTrigger>MCP</ContextMenuSubTrigger>
               <ContextMenuSubContent className="max-h-72 overflow-y-auto">
@@ -403,6 +447,8 @@ function Surface() {
           </ContextMenuContent>
         </ContextMenu>
 
+
+        {!CHAT_PANEL_ENABLED && <CentralChat />}
 
         <FileViewer />
         <CanvasDialogs />

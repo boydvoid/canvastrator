@@ -68,6 +68,53 @@ pub enum Provider {
     Opencode,
 }
 
+/// The directories holding a turn's images, deduplicated and in the order they
+/// were first seen. Pasted images share one directory; an image file node from
+/// the canvas brings its own, wherever the user keeps it.
+fn image_dirs(images: &[String]) -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    for img in images {
+        let Some(dir) = std::path::Path::new(img).parent() else { continue };
+        let dir = dir.to_string_lossy().into_owned();
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// claude only looks at an image if the prompt names it, so the paths are
+/// appended to the prompt itself. Kept out of the way at the end, after the
+/// user's own words, and left alone entirely when there are no images.
+fn image_prompt(prompt: &str, images: &[String]) -> String {
+    if images.is_empty() {
+        return prompt.to_string();
+    }
+    let list = images.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
+    format!("{prompt}\n\n<canvastrator-images>\nImages attached to this message. Read them:\n{list}\n</canvastrator-images>")
+}
+
+/// Everything one turn's argv depends on.
+///
+/// `resume` carries the provider's own session id from a previous turn, which
+/// is how continuity is kept — each turn is a fresh process, the conversation
+/// lives in the CLI's store.
+///
+/// `images` are absolute paths, because none of these CLIs takes image bytes.
+/// Every flag that takes them is variadic, so each provider needs the trailing
+/// prompt fenced off from it — see the comments in `args`; getting that wrong
+/// hangs the turn rather than failing it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TurnArgs<'a> {
+    pub prompt: &'a str,
+    pub resume: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub perm: Permission,
+    pub effort: Option<Effort>,
+    pub mcp_config: Option<&'a str>,
+    pub images: &'a [String],
+}
+
 impl Provider {
     pub fn binary(&self) -> &'static str {
         match self {
@@ -77,18 +124,9 @@ impl Provider {
         }
     }
 
-    /// Argument vector for one turn. `resume` carries the provider's own
-    /// session id from a previous turn, which is how continuity is kept —
-    /// each turn is a fresh process, the conversation lives in the CLI's store.
-    pub fn args(
-        &self,
-        prompt: &str,
-        resume: Option<&str>,
-        model: Option<&str>,
-        perm: Permission,
-        effort: Option<Effort>,
-        mcp_config: Option<&str>,
-    ) -> Vec<String> {
+    /// Argument vector for one turn.
+    pub fn args(&self, turn: &TurnArgs) -> Vec<String> {
+        let TurnArgs { prompt, resume, model, perm, effort, mcp_config, images } = *turn;
         let s = |v: &str| v.to_string();
         match self {
             Provider::Claude => {
@@ -123,13 +161,24 @@ impl Provider {
                     a.push(s("--mcp-config"));
                     a.push(s(cfg));
                 }
+                // claude has no image flag: it opens a path it finds in the
+                // prompt with its Read tool. Outside the cwd that read is
+                // denied, so every directory the images live in is granted
+                // here. `--add-dir` is variadic, which is why
+                // `--permission-mode` follows it rather than preceding it —
+                // otherwise it would swallow the prompt.
+                let dirs = image_dirs(images);
+                if !dirs.is_empty() {
+                    a.push(s("--add-dir"));
+                    a.extend(dirs);
+                }
                 a.push(s("--permission-mode"));
                 a.push(s(match perm {
                     Permission::Plan => "plan",
                     Permission::Auto => "auto",
                     Permission::Full => "bypassPermissions",
                 }));
-                a.push(s(prompt));
+                a.push(image_prompt(prompt, images));
                 a
             }
             Provider::Codex => {
@@ -162,7 +211,27 @@ impl Provider {
                     Permission::Auto => a.push(s("--full-auto")),
                     Permission::Full => a.push(s("--dangerously-bypass-approvals-and-sandbox")),
                 }
-                a.push(s(prompt));
+                // `codex exec resume` is its own subcommand with its own,
+                // much smaller set of arguments, and `-i` is not among them —
+                // it is rejected outright, which fails the turn rather than
+                // degrading it. So a resumed turn names the paths in the
+                // prompt instead, the way claude gets them; codex can read a
+                // file it is told about.
+                let resumed = resume.is_some();
+                // On a fresh turn `-i` takes any number of files and would eat
+                // the prompt as one more of them. codex is then left with no
+                // prompt, waits on a stdin we closed, and the turn never ends
+                // — so the prompt is fenced off behind `--`.
+                if !images.is_empty() && !resumed {
+                    a.push(s("-i"));
+                    a.extend(images.iter().cloned());
+                    a.push(s("--"));
+                }
+                a.push(if resumed {
+                    image_prompt(prompt, images)
+                } else {
+                    s(prompt)
+                });
                 a
             }
             Provider::Opencode => {
@@ -183,6 +252,12 @@ impl Provider {
                 }
                 if !matches!(perm, Permission::Plan) {
                     a.push(s("--auto"));
+                }
+                // Variadic, and fenced off for the same reason as codex's `-i`.
+                if !images.is_empty() {
+                    a.push(s("-f"));
+                    a.extend(images.iter().cloned());
+                    a.push(s("--"));
                 }
                 a.push(s(prompt));
                 a
@@ -369,6 +444,18 @@ fn parse_claude(v: &Value) -> Vec<AgentEvent> {
                         .get("usage")
                         .and_then(|u| u.get("output_tokens"))
                         .and_then(Value::as_u64),
+                    // The prompt this turn actually carried. Claude reports the
+                    // cached part separately and `input_tokens` counts only what
+                    // was not cached, so summing the three is the only way to
+                    // learn how full the window is.
+                    context_tokens: sum_tokens(
+                        v.get("usage"),
+                        &[
+                            "input_tokens",
+                            "cache_creation_input_tokens",
+                            "cache_read_input_tokens",
+                        ],
+                    ),
                 });
             }
         }
@@ -427,6 +514,13 @@ fn parse_codex(v: &Value) -> Vec<AgentEvent> {
                     .get("usage")
                     .and_then(|u| u.get("output_tokens"))
                     .and_then(Value::as_u64),
+                // Codex counts cached tokens inside `input_tokens` and reports
+                // `cached_input_tokens` as a subset of it, so adding the two
+                // would double-count the cached half.
+                context_tokens: v
+                    .get("usage")
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(Value::as_u64),
             });
         }
         Some("turn.failed") => out.push(AgentEvent::Failed {
@@ -484,10 +578,35 @@ fn parse_opencode(v: &Value) -> Vec<AgentEvent> {
             cost_usd: v.get("cost").and_then(Value::as_f64),
             input_tokens: str_at(v, &["tokens", "input"]).and_then(|s| s.parse().ok()),
             output_tokens: str_at(v, &["tokens", "output"]).and_then(|s| s.parse().ok()),
+            // opencode reports cache reads alongside the input count rather
+            // than inside it, so the window holds both.
+            context_tokens: match (
+                str_at(v, &["tokens", "input"]).and_then(|s| s.parse::<u64>().ok()),
+                str_at(v, &["tokens", "cache", "read"]).and_then(|s| s.parse::<u64>().ok()),
+            ) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+            },
         }),
         _ => {}
     }
     out
+}
+
+/// Add up the token fields that make up one prompt.
+///
+/// `None` when the object is missing or carries none of them — a turn that
+/// reported no usage at all must not read as a turn that used no context, or a
+/// meter built on this would show an empty window for a full conversation.
+fn sum_tokens(usage: Option<&Value>, fields: &[&str]) -> Option<u64> {
+    let usage = usage?;
+    let mut total = None;
+    for f in fields {
+        if let Some(n) = usage.get(f).and_then(Value::as_u64) {
+            total = Some(total.unwrap_or(0) + n);
+        }
+    }
+    total
 }
 
 /// Tools whose paths the agent is changing rather than just reading.
@@ -791,12 +910,54 @@ mod tests {
     fn claude_result_carries_cost_and_usage() {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"pong","total_cost_usd":0.1,"usage":{"input_tokens":2,"output_tokens":6}}"#;
         match Provider::Claude.parse_line(line).as_slice() {
-            [AgentEvent::Result { text, cost_usd, input_tokens, output_tokens }] => {
+            [AgentEvent::Result { text, cost_usd, input_tokens, output_tokens, .. }] => {
                 assert_eq!(text, "pong");
                 assert_eq!(*cost_usd, Some(0.1));
                 assert_eq!(*input_tokens, Some(2));
                 assert_eq!(*output_tokens, Some(6));
             }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// What a context meter needs, and why it is not `input_tokens`.
+    ///
+    /// On a cached conversation Claude bills a few hundred fresh tokens while
+    /// the prompt it actually read is the whole history. A meter built on the
+    /// billed figure would show an almost-empty window on a conversation about
+    /// to overflow — the one moment it exists to warn about.
+    #[test]
+    fn claude_context_tokens_count_the_cached_prompt_too() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":120,"cache_creation_input_tokens":4000,"cache_read_input_tokens":90000,"output_tokens":50}}"#;
+        match Provider::Claude.parse_line(line).as_slice() {
+            [AgentEvent::Result { input_tokens, context_tokens, .. }] => {
+                assert_eq!(*input_tokens, Some(120));
+                assert_eq!(*context_tokens, Some(94_120));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// A turn that reported no usage at all must not read as a turn that used
+    /// no context — an empty window and an unknown one are different states,
+    /// and only one of them is safe to draw as empty.
+    #[test]
+    fn claude_context_tokens_absent_when_usage_is() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","total_cost_usd":0.1}"#;
+        match Provider::Claude.parse_line(line).as_slice() {
+            [AgentEvent::Result { context_tokens, .. }] => assert_eq!(*context_tokens, None),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Codex reports its cached tokens as a subset of `input_tokens`, so the
+    /// window is the input count alone. Adding the cached figure would show a
+    /// window twice as full as it is.
+    #[test]
+    fn codex_context_tokens_do_not_double_count_the_cache() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":8000,"cached_input_tokens":6000,"output_tokens":200}}"#;
+        match Provider::Codex.parse_line(line).as_slice() {
+            [AgentEvent::Result { context_tokens, .. }] => assert_eq!(*context_tokens, Some(8000)),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -892,44 +1053,44 @@ mod tests {
     /// cannot answer a prompt, so every edit is silently refused.
     #[test]
     fn auto_mode_authorises_edits_and_commands_on_every_provider() {
-        let c = Provider::Claude.args("hi", None, None, Permission::Auto, None, None);
+        let c = Provider::Claude.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, ..Default::default() });
         // Not `acceptEdits` — that denies `cargo build` and friends outright.
         assert!(c.windows(2).any(|w| w == ["--permission-mode", "auto"]));
         assert!(!c.iter().any(|a| a == "acceptEdits"));
 
-        let x = Provider::Codex.args("hi", None, None, Permission::Auto, None, None);
+        let x = Provider::Codex.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, ..Default::default() });
         assert!(x.iter().any(|a| a == "--full-auto"));
         assert!(!x.iter().any(|a| a == "--sandbox"), "--full-auto already sets the sandbox");
 
-        let o = Provider::Opencode.args("hi", None, None, Permission::Auto, None, None);
+        let o = Provider::Opencode.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, ..Default::default() });
         assert!(o.iter().any(|a| a == "--auto"));
     }
 
     #[test]
     fn plan_mode_withholds_write_access() {
-        let c = Provider::Claude.args("hi", None, None, Permission::Plan, None, None);
+        let c = Provider::Claude.args(&TurnArgs { prompt: "hi", perm: Permission::Plan, ..Default::default() });
         assert!(c.windows(2).any(|w| w == ["--permission-mode", "plan"]));
 
-        let x = Provider::Codex.args("hi", None, None, Permission::Plan, None, None);
+        let x = Provider::Codex.args(&TurnArgs { prompt: "hi", perm: Permission::Plan, ..Default::default() });
         assert!(x.windows(2).any(|w| w == ["--sandbox", "read-only"]));
 
-        let o = Provider::Opencode.args("hi", None, None, Permission::Plan, None, None);
+        let o = Provider::Opencode.args(&TurnArgs { prompt: "hi", perm: Permission::Plan, ..Default::default() });
         assert!(!o.iter().any(|a| a == "--auto"));
     }
 
     #[test]
     fn full_mode_is_distinct_from_edit() {
-        let c = Provider::Claude.args("hi", None, None, Permission::Full, None, None);
+        let c = Provider::Claude.args(&TurnArgs { prompt: "hi", perm: Permission::Full, ..Default::default() });
         assert!(c.windows(2).any(|w| w == ["--permission-mode", "bypassPermissions"]));
 
-        let x = Provider::Codex.args("hi", None, None, Permission::Full, None, None);
+        let x = Provider::Codex.args(&TurnArgs { prompt: "hi", perm: Permission::Full, ..Default::default() });
         assert!(x.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
     }
 
     #[test]
     fn attached_mcp_servers_are_passed_per_invocation() {
         let cfg = r#"{"mcpServers":{"flowiki":{"type":"http"}}}"#;
-        let a = Provider::Claude.args("hi", None, None, Permission::Auto, None, Some(cfg));
+        let a = Provider::Claude.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, mcp_config: Some(cfg), ..Default::default() });
         assert!(a.windows(2).any(|w| w == ["--mcp-config", cfg]));
         // Additive: the user's own servers must survive.
         assert!(!a.iter().any(|x| x == "--strict-mcp-config"));
@@ -937,44 +1098,110 @@ mod tests {
 
     #[test]
     fn no_attached_servers_means_no_mcp_flag() {
-        let a = Provider::Claude.args("hi", None, None, Permission::Auto, None, None);
+        let a = Provider::Claude.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, ..Default::default() });
         assert!(!a.iter().any(|x| x == "--mcp-config"));
     }
 
     #[test]
     fn resume_flag_is_provider_specific() {
-        let a = Provider::Claude.args("hi", Some("sid"), None, Permission::Auto, None, None);
+        let a = Provider::Claude.args(&TurnArgs { prompt: "hi", resume: Some("sid"), perm: Permission::Auto, ..Default::default() });
         assert!(a.windows(2).any(|w| w == ["--resume", "sid"]));
         // A fresh claude turn must pin its own session id so we can resume it.
-        let fresh = Provider::Claude.args("hi", None, None, Permission::Auto, None, None);
+        let fresh = Provider::Claude.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, ..Default::default() });
         assert!(fresh.iter().any(|x| x == "--session-id"));
 
-        let c = Provider::Codex.args("hi", Some("thread"), None, Permission::Auto, None, None);
+        let c = Provider::Codex.args(&TurnArgs { prompt: "hi", resume: Some("thread"), perm: Permission::Auto, ..Default::default() });
         assert!(c.windows(2).any(|w| w == ["resume", "thread"]));
 
-        let o = Provider::Opencode.args("hi", Some("ses"), None, Permission::Auto, None, None);
+        let o = Provider::Opencode.args(&TurnArgs { prompt: "hi", resume: Some("ses"), perm: Permission::Auto, ..Default::default() });
         assert!(o.windows(2).any(|w| w == ["--session", "ses"]));
     }
 
     #[test]
     fn effort_is_passed_through_per_provider_and_omitted_when_unset() {
-        let c = Provider::Claude.args("hi", None, None, Permission::Auto, Some(Effort::Xhigh), None);
+        let c = Provider::Claude.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, effort: Some(Effort::Xhigh), ..Default::default() });
         assert!(c.windows(2).any(|w| w == ["--effort", "xhigh"]));
 
         // Codex has no rung above `high`, so the top two clamp onto it.
-        let x = Provider::Codex.args("hi", None, None, Permission::Auto, Some(Effort::Max), None);
+        let x = Provider::Codex.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, effort: Some(Effort::Max), ..Default::default() });
         assert!(x
             .windows(2)
             .any(|w| w == ["--config", "model_reasoning_effort=\"high\""]));
 
-        let o = Provider::Opencode.args("hi", None, None, Permission::Auto, Some(Effort::Low), None);
+        let o = Provider::Opencode.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, effort: Some(Effort::Low), ..Default::default() });
         assert!(o.windows(2).any(|w| w == ["--variant", "low"]));
 
         // Unset must mean "the CLI's own default", not a level we chose.
         for p in [Provider::Claude, Provider::Codex, Provider::Opencode] {
-            let a = p.args("hi", None, None, Permission::Auto, None, None);
+            let a = p.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, ..Default::default() });
             assert!(!a.iter().any(|x| x == "--effort" || x == "--variant"));
             assert!(!a.iter().any(|x| x.contains("model_reasoning_effort")));
+        }
+    }
+    fn imgs() -> Vec<String> {
+        vec!["/tmp/gridterm/s1/a.png".into(), "/tmp/gridterm/s1/b.png".into()]
+    }
+
+    #[test]
+    fn codex_and_opencode_fence_the_prompt_off_from_the_variadic_image_flag() {
+        // Without the `--`, the image flag eats the prompt, codex blocks on the
+        // stdin we closed, and the turn hangs forever.
+        let x = Provider::Codex.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, images: &imgs(), ..Default::default() });
+        let i = x.iter().position(|a| a == "-i").expect("-i");
+        assert_eq!(&x[i..], &["-i", "/tmp/gridterm/s1/a.png", "/tmp/gridterm/s1/b.png", "--", "hi"]);
+
+        let o = Provider::Opencode.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, images: &imgs(), ..Default::default() });
+        let f = o.iter().position(|a| a == "-f").expect("-f");
+        assert_eq!(&o[f..], &["-f", "/tmp/gridterm/s1/a.png", "/tmp/gridterm/s1/b.png", "--", "hi"]);
+    }
+
+    /// `codex exec resume` takes neither `-i` nor a `--`; passing either is an
+    /// unexpected-argument error and the turn fails outright. The paths go in
+    /// the prompt on that branch instead.
+    #[test]
+    fn a_resumed_codex_turn_names_the_images_in_the_prompt_rather_than_passing_minus_i() {
+        let x = Provider::Codex.args(&TurnArgs { prompt: "hi", resume: Some("thread"), perm: Permission::Auto, images: &imgs(), ..Default::default() });
+        assert!(!x.iter().any(|a| a == "-i"), "{x:?}");
+        assert!(!x.iter().any(|a| a == "--"), "{x:?}");
+        let prompt = x.last().unwrap();
+        assert!(prompt.starts_with("hi"));
+        for p in imgs() {
+            assert!(prompt.contains(&p), "{prompt} is missing {p}");
+        }
+        // A fresh turn still uses the flag, which is the better route.
+        let fresh = Provider::Codex.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, images: &imgs(), ..Default::default() });
+        assert!(fresh.iter().any(|a| a == "-i"));
+        assert_eq!(fresh.last().unwrap(), "hi");
+    }
+
+    #[test]
+    fn claude_grants_the_image_directory_once_and_names_the_paths_in_the_prompt() {
+        let mut with_node = imgs();
+        with_node.push("/Users/x/proj/shot.png".into());
+        let c = Provider::Claude.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, images: &with_node, ..Default::default() });
+
+        // One `--add-dir`, each distinct directory once.
+        assert_eq!(c.iter().filter(|a| *a == "--add-dir").count(), 1);
+        let d = c.iter().position(|a| a == "--add-dir").unwrap();
+        assert_eq!(&c[d..d + 3], &["--add-dir", "/tmp/gridterm/s1", "/Users/x/proj"]);
+        // `--add-dir` is variadic too, so it must not be the last flag.
+        assert_eq!(c[d + 3], "--permission-mode");
+
+        // The prompt is the trailing positional, and carries the paths, since
+        // claude only reads an image the prompt mentions.
+        let prompt = c.last().unwrap();
+        assert!(prompt.starts_with("hi"));
+        for p in &with_node {
+            assert!(prompt.contains(p.as_str()), "{prompt} is missing {p}");
+        }
+    }
+
+    #[test]
+    fn no_images_leaves_every_provider_exactly_as_it_was() {
+        for p in [Provider::Claude, Provider::Codex, Provider::Opencode] {
+            let a = p.args(&TurnArgs { prompt: "hi", perm: Permission::Auto, ..Default::default() });
+            assert_eq!(a.last().unwrap(), "hi");
+            assert!(!a.iter().any(|x| x == "--" || x == "-i" || x == "-f" || x == "--add-dir"));
         }
     }
 }

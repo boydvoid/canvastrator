@@ -32,16 +32,14 @@ import {
   modelLabel,
   PERMISSION_HINT,
   PERMISSION_LABEL,
+  PERMISSIONS,
   PROVIDER_ACCENT,
   PROVIDER_LABEL,
   type Message,
-  type Permission,
 } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
-const PERMISSIONS: Permission[] = ['plan', 'auto', 'full']
-
-function Bubble({ msg, accent }: { msg: Message; accent: string }) {
+export function Bubble({ msg, accent }: { msg: Message; accent: string }) {
   if (msg.role === 'system') {
     return (
       <div className="rounded-md border border-dashed border-line-strong px-2.5 py-1.5 font-mono text-[11px] text-fg-subtle">
@@ -94,7 +92,7 @@ function Bubble({ msg, accent }: { msg: Message; accent: string }) {
   )
 }
 
-function ModelMenu({ node }: { node: GtNode & { type: 'session' } }) {
+export function ModelMenu({ node }: { node: GtNode & { type: 'session' } }) {
   const setModel = useStore((s) => s.setModel)
   const [custom, setCustom] = useState(false)
   const options = MODEL_OPTIONS[node.data.provider]
@@ -155,7 +153,7 @@ function ModelMenu({ node }: { node: GtNode & { type: 'session' } }) {
  * whole reason to reach for this, and silently applying it to the *next* reply
  * would be the opposite of what was asked for.
  */
-function EffortMenu({ node }: { node: GtNode & { type: 'session' } }) {
+export function EffortMenu({ node }: { node: GtNode & { type: 'session' } }) {
   const setEffort = useStore((s) => s.setEffort)
   const d = node.data
   const busy = d.state === 'thinking' || d.state === 'streaming'
@@ -270,7 +268,7 @@ function FolderRow({
  * and effort pickers because that is where the rest of this session's
  * configuration already is.
  */
-function FolderMenu({ node }: { node: GtNode & { type: 'session' } }) {
+export function FolderMenu({ node }: { node: GtNode & { type: 'session' } }) {
   const nodes = useStore((s) => s.nodes)
   const edges = useStore((s) => s.edges)
   const attachFolder = useStore((s) => s.attachFolder)
@@ -355,7 +353,7 @@ function FolderMenu({ node }: { node: GtNode & { type: 'session' } }) {
  * is written, and an agent is deleted — one place per setting, next to the
  * conversation it affects.
  */
-function SessionSettings({ node }: { node: GtNode & { type: 'session' } }) {
+export function SessionSettings({ node }: { node: GtNode & { type: 'session' } }) {
   const rename = useStore((s) => s.renameSession)
   const setPermission = useStore((s) => s.setPermission)
   const setInstructions = useStore((s) => s.setInstructions)
@@ -651,14 +649,21 @@ export function ChatPanel() {
       {/* composer */}
       <div className="shrink-0 border-t border-line-soft p-2">
         <Composer
+          // Keyed to the target: a pasted image lives under *that* session's
+          // temp dir, and carrying it across a switch would send session A's
+          // screenshot to session B, pointing at a directory A takes with it
+          // when it's deleted. The remount drops the draft too, which is the
+          // same bargain and the less surprising one.
+          key={d.sessionId}
           placeholder={busy ? 'running…' : `Message ${d.name}   ↵ send · ⇧↵ newline · / commands · @ files`}
           busy={busy}
+          sessionId={d.sessionId}
           cwd={cwd}
           roots={searchRootsFor(nodes, edges, active.id)}
           canvasFiles={canvasFilesFor(nodes)}
           provider={d.provider}
           liveCommands={[...(d.commands ?? []), ...(d.skills ?? [])]}
-          onSend={(text) => void send(active.id, text)}
+          onSend={(text, images) => void send(active.id, text, images)}
           onInterrupt={() => void interrupt(active.id)}
         />
         <div className="mt-1 flex items-center gap-2 font-mono text-[9.5px] text-fg-faint">

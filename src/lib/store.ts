@@ -9,12 +9,28 @@ import {
   type Node,
   type NodeChange,
 } from '@xyflow/react'
-import { dirExists, fileExists, interruptSession, sendTurn } from './bridge'
+import {
+  clearSessionImages,
+  dirExists,
+  fileExists,
+  fileStamp,
+  interruptSession,
+  sendTurn,
+} from './bridge'
 import { digest, readShared } from './filecache'
+import { attachableImage } from './filekind'
 import { handBack, parseReport, REPORT_INSTRUCTION, reportBlock } from './report'
 import { looksLikeQuestion } from './asking'
 import { boxOf, FILE_SIZE, findFreeSpot, layoutCanvas, SESSION_SIZE, sizeOf } from './layout'
 import { parsePersonaDefinitions } from './persona-parse'
+import {
+  checkShape,
+  fansOut,
+  MAX_FANOUT,
+  parsePattern,
+  patternBlock,
+  type PatternId,
+} from './patterns'
 import { nextStep, parsePlan, planLive } from './plan'
 import { summarizeTurn } from './summary'
 import {
@@ -25,7 +41,9 @@ import {
   type Persona,
 } from './library'
 import {
+  DEFAULT_ORCHESTRA,
   MODEL_OPTIONS,
+  MODEL_TIERS,
 } from './types'
 import type {
   AgentEvent,
@@ -36,8 +54,10 @@ import type {
   McpNodeData,
   McpServer,
   McpToolNodeData,
+  UsageNodeData,
   Message,
   ModelOption,
+  OrchestraPrefs,
   Permission,
   Plan,
   PlanStep,
@@ -51,6 +71,13 @@ import type {
 
 export type CanvasDialog = 'open' | 'save-as' | 'rules'
 
+/**
+ * A message that arrived while its session was busy. Images ride along with
+ * the text: they are already on disk by then, and dropping them would send a
+ * question about a screenshot with no screenshot.
+ */
+export type QueuedTurn = { text: string; images: string[] }
+
 export type GtNode =
   | (Node<SessionNodeData> & { type: 'session' })
   | (Node<SkillNodeData> & { type: 'skill' })
@@ -58,6 +85,7 @@ export type GtNode =
   | (Node<FileNodeData> & { type: 'file' })
   | (Node<McpNodeData> & { type: 'mcp' })
   | (Node<McpToolNodeData> & { type: 'mcptool' })
+  | (Node<UsageNodeData> & { type: 'usage' })
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 
@@ -110,6 +138,14 @@ type State = {
   /** Session node the chat panel is pointed at. Falls back to the orchestrator. */
   chatTarget: string | null
 
+  /**
+   * Which models the user wants this canvas's orchestrator reaching for. Read
+   * by `orchestratorBlock`; set from the chatbox.
+   */
+  orchestra: OrchestraPrefs
+  /** Partial so one control moves one field — the rest keep their setting. */
+  setOrchestra: (patch: Partial<OrchestraPrefs>) => void
+
   onNodesChange: (c: NodeChange<GtNode>[]) => void
   onEdgesChange: (c: EdgeChange[]) => void
   onConnect: (c: Connection) => void
@@ -137,6 +173,12 @@ type State = {
   setPrimaryFolder: (sessionNodeId: string, folderNodeId: string) => void
   addFile: (path: string, pos: { x: number; y: number }, origin?: 'user' | 'agent') => string
   addMcp: (server: McpServer, pos: { x: number; y: number }) => string
+  /**
+   * The usage panel. One per canvas — a second copy of the same live figures
+   * would be two things to move and nothing extra to read — so this returns
+   * the existing one when there is one.
+   */
+  addUsage: (pos: { x: number; y: number }) => string
   initLibrary: () => Promise<void>
   setLibrary: (l: Persona[]) => Promise<void>
   toggleLibrary: () => void
@@ -153,13 +195,13 @@ type State = {
   markNotificationsRead: () => void
   clearNotifications: () => void
   /** Messages typed at a session that was mid-turn, waiting their turn. */
-  queued: Record<string, string[]>
+  queued: Record<string, QueuedTurn[]>
   /**
    * Sessions whose in-flight turn is being abandoned and re-run, keyed to the
    * prompt to replay. Set when a setting that only takes effect at turn start
    * — effort — changes mid-turn.
    */
-  restarting: Record<string, string>
+  restarting: Record<string, QueuedTurn>
   /** Hand a node back to the user — called when they drag it. */
   claimNode: (id: string) => void
   toggleAutoTidy: () => void
@@ -194,7 +236,7 @@ type State = {
   setCanvasDialog: (d: CanvasDialog | null) => void
   setGlobalRules: (rules: string) => void
 
-  send: (nodeId: string, text: string) => Promise<void>
+  send: (nodeId: string, text: string, images?: string[]) => Promise<void>
   interrupt: (nodeId: string) => Promise<void>
   applyEvent: (sessionId: string, ev: AgentEvent) => void
 }
@@ -531,6 +573,44 @@ export function rosterUpdateBlock(roster: Persona[]): string {
 }
 
 /**
+ * The user's standing model preference for this canvas, as a block.
+ *
+ * Empty when nothing is set, and the caller drops empty parts — a canvas with
+ * no preference must send the orchestrator exactly what it sent before this
+ * existed, rather than a paragraph saying there is nothing to say.
+ *
+ * Worded as a default rather than a rule: the tier mapping above is about what
+ * a model is *good at*, and an orchestrator that obeyed a preference into
+ * giving a light model an architecture task would be following the letter of
+ * this and losing the point of both.
+ */
+export function orchestraBlock(prefs: OrchestraPrefs): string {
+  const lines = [
+    ...(prefs.provider ? [`- Spawn on ${prefs.provider} unless the work needs another provider.`] : []),
+    ...MODEL_TIERS.filter((t) => prefs[t]).map(
+      (t) => `- For ${TIER_USE[t]}, use ${prefs[t]}.`,
+    ),
+  ]
+  if (!lines.length) return ''
+  return [
+    '<canvastrator-model-preference>',
+    "The user has said which models this canvas should reach for. Treat these as the default choice for a persona you invent, in place of picking freely from the mapping above:",
+    ...lines,
+    '',
+    'Depart from one only when the work plainly needs a different model, and say so in the same reply when you do.',
+    '</canvastrator-model-preference>',
+  ].join('\n')
+}
+
+/**
+ * The preference as a watermark. Sent-once blocks are re-sent when their key
+ * changes, so a preference the user edits mid-conversation reaches an agent
+ * that has already had its brief.
+ */
+export const orchestraKey = (prefs: OrchestraPrefs): string =>
+  [prefs.provider, ...MODEL_TIERS.map((t) => prefs[t])].map((v) => v ?? '').join('|')
+
+/**
  * The orchestrator's standing brief: what it is for, and how to say what it
  * wants done.
  *
@@ -540,8 +620,13 @@ export function rosterUpdateBlock(roster: Persona[]): string {
  * roster that changes on its own goes as a `rosterUpdateBlock` instead, which
  * is a tenth of the size.
  */
-export function orchestratorBlock(roster: Persona[], planning: boolean): string {
+export function orchestratorBlock(
+  roster: Persona[],
+  planning: boolean,
+  orchestra: OrchestraPrefs = DEFAULT_ORCHESTRA,
+): string {
   const list = roster.length ? roster.map(rosterLine).join('\n') : '(none yet)'
+  const preference = orchestraBlock(orchestra)
 
   // Planning mode changes what the orchestrator is for: it proposes the
   // whole job and the user approves it, rather than starting the first
@@ -572,6 +657,8 @@ export function orchestratorBlock(roster: Persona[], planning: boolean): string 
     '',
     'Do the work yourself ONLY when it is trivial: a direct question about this conversation, a one-line clarification, or deciding what to do next. Anything that involves reading a codebase, writing or changing files, running commands, designing, reviewing, or research goes to a specialist — even when you could do it. A task you complete yourself is a task the user cannot see, re-run, or reassign.',
     '',
+    patternBlock(planning),
+    '',
     'Available personas:',
     list,
     '',
@@ -597,6 +684,9 @@ export function orchestratorBlock(roster: Persona[], planning: boolean): string 
     '- permission: plan for anything read-only (review, research, design), auto when it must edit files or run commands, full only when it genuinely needs an unsandboxed machine.',
     '- description: when a future orchestrator should reach for this. It is the only thing routing sees, so make it specific.',
     '',
+    // Dropped by the join when empty, so a canvas with no preference set reads
+    // exactly as it did before this existed.
+    ...(preference ? [preference, ''] : []),
     'A persona you define is saved to the user\'s library and reusable on every canvas, so define it as a lasting role, not a one-off errand. Name it for the role, never for the specific task.',
     '',
     `If this turn carries a <canvas-global-rules> block, those rules are the user's and they bind you. They also bind everyone you spawn: Canvastrator gives each new agent the same block, and you must restate anything task-specific from it in the ${planning ? 'PLAN' : 'SPAWN'} text you write.`,
@@ -826,6 +916,7 @@ export const useStore = create<State>((set, get) => ({
   libraryOpen: true,
   rightTab: 'chat',
   chatTarget: null,
+  orchestra: { ...DEFAULT_ORCHESTRA },
   autoTidy: true,
   // On by default. An orchestrator that spawns the moment it has an idea is
   // the behaviour this exists to make optional, not the one to default to.
@@ -1134,9 +1225,16 @@ export const useStore = create<State>((set, get) => ({
   },
 
   approvePlan: async () => {
-    // One at a time, in order. The steps of a plan are a sequence — a reviewer
-    // reads what the implementer wrote — and running them at once would hand
-    // every one of them the state from before any of them ran.
+    // A fan-out is the one shape where the steps do not read each other, which
+    // is the only thing that makes running them at once safe — and it is the
+    // orchestrator that said so, in the PATTERN line, before the user approved
+    // the plan it was written under.
+    const plan0 = get().plan
+    if (plan0 && fansOut(plan0.pattern?.id) && !plan0.warning) return runPlanFanout(plan0.fromNodeId)
+
+    // Otherwise one at a time, in order. The steps of a plan are a sequence —
+    // a reviewer reads what the implementer wrote — and running them at once
+    // would hand every one of them the state from before any of them ran.
     for (;;) {
       const plan = get().plan
       if (!plan) return
@@ -1191,6 +1289,19 @@ export const useStore = create<State>((set, get) => ({
     } catch (e) {
       set({ canvasError: String(e) })
     }
+  },
+
+  addUsage: (pos) => {
+    const existing = get().nodes.find((n) => n.type === 'usage')
+    if (existing) return existing.id
+    const id = `node_${uid()}`
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        { id, type: 'usage', position: pos, data: { usageId: `usage_${uid()}` } } as GtNode,
+      ],
+    }))
+    return id
   },
 
   addMcp: (server, pos) => {
@@ -1249,7 +1360,11 @@ export const useStore = create<State>((set, get) => ({
       ) as GtNode[],
     })),
 
-  removeNode: (id) =>
+  removeNode: (id) => {
+    // Pasted images outlive a turn — `--resume` can send the CLI back to the
+    // same path — so they're only dropped when the session itself goes.
+    const gone = get().nodes.find((n) => n.id === id)
+    if (gone && isSession(gone)) void clearSessionImages(gone.data.sessionId).catch(() => {})
     set((s) => ({
       // Deleting a folder node takes its `cwd` edge with it, so the survivors
       // need an heir promoted the same way detaching one does.
@@ -1262,7 +1377,8 @@ export const useStore = create<State>((set, get) => ({
       // Drop the dock's pointer too. The panel already falls back to the
       // orchestrator, but leaving a dead id around invites confusion later.
       chatTarget: s.chatTarget === id ? null : s.chatTarget,
-    })),
+    }))
+  },
 
   renameSession: (nodeId, name) =>
     set((s) => ({
@@ -1277,6 +1393,7 @@ export const useStore = create<State>((set, get) => ({
 
   setRightTab: (rightTab) => set({ rightTab, libraryOpen: true }),
   setChatTarget: (chatTarget) => set({ chatTarget }),
+  setOrchestra: (patch) => set((s) => ({ orchestra: { ...s.orchestra, ...patch } })),
 
   setModel: (nodeId, model) =>
     set((s) => ({
@@ -1315,7 +1432,9 @@ export const useStore = create<State>((set, get) => ({
     // traffic.
     const replay = [...node.data.messages].reverse().find((m) => m.role === 'user')
     if (replay) {
-      set((s) => ({ restarting: { ...s.restarting, [nodeId]: replay.text } }))
+      set((s) => ({
+        restarting: { ...s.restarting, [nodeId]: { text: replay.text, images: replay.images ?? [] } },
+      }))
     }
     void get().interrupt(nodeId)
   },
@@ -1336,7 +1455,7 @@ export const useStore = create<State>((set, get) => ({
 
   // ── the turn ────────────────────────────────────────────────────────
 
-  send: async (nodeId, text) => {
+  send: async (nodeId, text, pasted = []) => {
     const s = get()
     const node = s.nodes.find((n) => n.id === nodeId)
     if (!node || !isSession(node)) return
@@ -1348,7 +1467,7 @@ export const useStore = create<State>((set, get) => ({
     // the turn ends.
     if (node.data.state === 'thinking' || node.data.state === 'streaming') {
       set((st) => ({
-        queued: { ...st.queued, [nodeId]: [...(st.queued[nodeId] ?? []), text] },
+        queued: { ...st.queued, [nodeId]: [...(st.queued[nodeId] ?? []), { text, images: pasted }] },
       }))
       return
     }
@@ -1424,15 +1543,54 @@ export const useStore = create<State>((set, get) => ({
     // so a file wired into four agents is read from disk once.
     const fileBlocks: string[] = []
     const sentFiles: Record<string, string> = {}
+    // Pasted images first, then any image file nodes wired in — same order the
+    // user sees them.
+    const images: string[] = [...pasted]
     let fileBudget = FILE_BUDGET_CHARS
     for (const f of attachedFiles) {
       const path = f.data.path
       const seen = d.sentFiles?.[path]
+      // An image file node goes to the provider as an image, not as text. It
+      // used to be dropped here, silently and before a digest was recorded, so
+      // wiring a screenshot into an agent did nothing at all.
+      //
+      // `attachableImage`, not `fileKind` — the latter answers what the app can
+      // render, and would send an SVG down here instead of injecting its
+      // markup as text.
+      if (attachableImage(path)) {
+        // The bytes never enter the app, so size and mtime are the digest: a
+        // screenshot re-saved over the same path has to go out again, which a
+        // digest of the path alone could never notice.
+        const st = await fileStamp(path).catch(() => null)
+        // Not there. No digest recorded, so it goes out when it comes back —
+        // the same way the text path treats a file it can't read, rather than
+        // failing the whole turn.
+        if (!st) {
+          fileBlocks.push(`<canvastrator-file path="${path}" error="unreadable" />`)
+          continue
+        }
+        const stamp = digest(`image:${st.bytes}:${st.mtimeMs}`)
+        sentFiles[path] = stamp
+        if (stamp !== seen) images.push(path)
+        continue
+      }
       try {
         // Read even when the budget is spent: an unread file has no digest,
         // and skipping it would make it look unchanged on the next turn.
         const peek = await readShared(path, 24_000)
-        if (peek.binary) continue
+        // Anything else binary can't be shown and can't be read. Say so, once,
+        // rather than leaving the agent to wonder why the file it was given
+        // never arrived.
+        if (peek.binary) {
+          const stamp = digest(`binary:${peek.bytes}`)
+          sentFiles[path] = stamp
+          if (stamp !== seen) {
+            fileBlocks.push(
+              `<canvastrator-file path="${path}" binary="true" bytes="${peek.bytes}" />`,
+            )
+          }
+          continue
+        }
         const stamp = digest(peek.text)
         sentFiles[path] = stamp
         if (stamp === seen) continue
@@ -1527,7 +1685,10 @@ export const useStore = create<State>((set, get) => ({
     // 3b. Everything this session may instantiate: the persona library, which
     // is available everywhere. Sent once — a resumed session still has it.
     const roster = rosterFor(s.library)
-    const mode = s.planning ? 'plan' : 'run'
+    // The brief carries the protocol *and* the model preference, so the
+    // watermark has to move when either does — a preference edited mid-
+    // conversation would otherwise never reach an agent already briefed.
+    const mode = `${s.planning ? 'plan' : 'run'}·${orchestraKey(s.orchestra)}`
     const rKey = rosterKey(roster)
     let sentOrchestrator = d.sentOrchestrator
     let sentRoster = d.sentRoster
@@ -1535,7 +1696,7 @@ export const useStore = create<State>((set, get) => ({
       if (d.sentOrchestrator !== mode) {
         // New agent, or planning mode flipped under it: the protocol it is
         // holding is the wrong one, so the whole brief goes again.
-        parts.push(orchestratorBlock(roster, s.planning))
+        parts.push(orchestratorBlock(roster, s.planning, s.orchestra))
         sentOrchestrator = mode
         sentRoster = rKey
       } else if (d.sentRoster !== rKey) {
@@ -1564,7 +1725,13 @@ export const useStore = create<State>((set, get) => ({
     const prompt = parts.join('\n\n')
 
     // 4. Optimistic UI: user turn in, assistant placeholder streaming.
-    const userMsg: Message = { id: uid(), role: 'user', text, tools: [] }
+    const userMsg: Message = {
+      id: uid(),
+      role: 'user',
+      text,
+      tools: [],
+      ...(images.length ? { images } : {}),
+    }
     const pending: Message = { id: uid(), role: 'assistant', text: '', tools: [], pending: true }
 
     set((st) => ({
@@ -1616,6 +1783,7 @@ export const useStore = create<State>((set, get) => ({
         effort: d.effort ?? null,
         permission: d.permission,
         mcpServers: mcpFor(s.nodes, s.edges, nodeId),
+        images,
       })
     } catch (err) {
       get().applyEvent(d.sessionId, { kind: 'failed', message: String(err) })
@@ -1758,6 +1926,11 @@ export const useStore = create<State>((set, get) => ({
             inputTokens: d.usage.inputTokens + (ev.inputTokens ?? 0),
             outputTokens: d.usage.outputTokens + (ev.outputTokens ?? 0),
           },
+          // Replaced, not accumulated: the whole conversation is resent every
+          // turn, so this is how big the conversation *is*. A turn that
+          // reported nothing leaves the last known figure standing rather than
+          // blanking the meter mid-run.
+          ...(ev.contextTokens != null ? { contextTokens: ev.contextTokens } : {}),
         }))
         break
       }
@@ -1786,7 +1959,7 @@ export const useStore = create<State>((set, get) => ({
             turnStartedAt: undefined,
             messages: dropAbandonedTurn(d.messages),
           }))
-          setTimeout(() => void get().send(nodeId, replay), 0)
+          setTimeout(() => void get().send(nodeId, replay.text, replay.images), 0)
           break
         }
 
@@ -1794,7 +1967,7 @@ export const useStore = create<State>((set, get) => ({
         const waiting = get().queued[nodeId] ?? []
         if (waiting.length) {
           set((st) => ({ queued: { ...st.queued, [nodeId]: waiting.slice(1) } }))
-          setTimeout(() => void get().send(nodeId, waiting[0]), 0)
+          setTimeout(() => void get().send(nodeId, waiting[0].text, waiting[0].images), 0)
         }
         const finished = findSessionNode(get().nodes, sessionId)
         const last =
@@ -2171,6 +2344,16 @@ const MAX_CHILDREN_PER_AGENT = 8
 /** A backstop on the whole canvas, so a spawn loop can't run up a bill. */
 const MAX_SESSIONS = 24
 
+/**
+ * How long one plan may get.
+ *
+ * A plan accumulates: the orchestrator writes more steps every time a result
+ * comes back, and the evaluator-optimizer shape *is* that loop on purpose.
+ * Without a ceiling in the app, "revise until it is good" has no end that
+ * anyone but the user pays for.
+ */
+const MAX_PLAN_STEPS = 24
+
 export function spawnDepth(edges: Edge[], nodeId: string): number {
   let depth = 0
   let cur = nodeId
@@ -2265,8 +2448,15 @@ async function maybeSpawn(fromNodeId: string, text: string) {
   await spawnChild(fromNodeId, parsed.personality, parsed.task)
 }
 
-/** What came of asking for an agent: the one that ran, or why none did. */
-type SpawnResult = { ok: true; childId: string } | { ok: false; error: string }
+/**
+ * What came of asking for an agent: the one that ran, or why none did.
+ *
+ * `report` is only set when the caller asked to be given the hand-back rather
+ * than have it sent — see `defer` on `spawnChild`.
+ */
+type SpawnResult =
+  | { ok: true; childId: string; report?: string }
+  | { ok: false; error: string }
 
 /**
  * Create a worker, run the task on it, and feed the answer back to whoever
@@ -2282,6 +2472,16 @@ async function spawnChild(
   fromNodeId: string,
   personalityName: string,
   task: string,
+  /**
+   * Return the hand-back instead of sending it to the parent.
+   *
+   * A fan-out has several children finishing at once, and each of them
+   * sending its own report would start several overlapping turns on the same
+   * orchestrator. The caller collects them and sends one turn instead, which
+   * is both correct and the cheaper of the two: one reply that reads all the
+   * results together, rather than N replies each holding one of them.
+   */
+  defer = false,
 ): Promise<SpawnResult> {
   const refuse = (error: string): SpawnResult => {
     noteOnNode(fromNodeId, error)
@@ -2417,11 +2617,33 @@ async function spawnChild(
     // so the parent paid for all of that to find the one paragraph it needed.
     // Its REPORT block is what travels; the rest stays on the child's node.
     handOver(parent.data.sessionId, done.data.sessionId)
-    await useStore
-      .getState()
-      .send(fromNodeId, reportBlock(name, persona.name, handBack(answer)))
+    const report = reportBlock(name, persona.name, handBack(answer))
+    if (defer) return { ok: true, childId, report }
+    await useStore.getState().send(fromNodeId, report)
   }
   return { ok: true, childId }
+}
+
+/**
+ * Hold the orchestrator to the shape it declared.
+ *
+ * An agent that has just been told fan-out is expensive will still sometimes
+ * write four steps under a shape that means one — the declaration is cheap to
+ * write and the plan beneath it is where the money goes. So the count is
+ * checked against the shape, the disagreement is put in front of the user on
+ * the node, and the plan loses the right to fan out: whichever half is wrong,
+ * running it in order is the reading that cannot be expensive by mistake.
+ */
+function mismatch(
+  fromNodeId: string,
+  id: PatternId | undefined,
+  count: number,
+): { warning?: string } {
+  if (!id) return {}
+  const complaint = checkShape(id, count)
+  if (!complaint) return {}
+  noteOnNode(fromNodeId, complaint)
+  return { warning: complaint }
 }
 
 /**
@@ -2443,9 +2665,38 @@ function proposePlan(fromNodeId: string, text: string) {
     state: 'pending',
   }))
 
+  // The shape it chose for this job. Absent when it skipped the line, which
+  // costs nothing: a plan with no shape runs in order, the safe reading.
+  const chosen = parsePattern(text)
+
   useStore.setState((s) => {
     const carry = s.plan && s.plan.fromNodeId === fromNodeId && planLive(s.plan.steps) ? s.plan : null
-    if (carry) return { plan: { ...carry, steps: [...carry.steps, ...steps] } }
+    if (carry) {
+      // A plan grows every time the orchestrator writes again, and it writes
+      // again after each step reports back. Nothing in that loop ends it on
+      // its own — an agent asked to critique its own plan will happily keep
+      // finding one more thing — so the ceiling is the app's, not the model's.
+      if (carry.steps.length >= MAX_PLAN_STEPS) {
+        noteOnNode(
+          fromNodeId,
+          `This plan is already ${carry.steps.length} steps long, the limit. Approve or drop what's there, or start a fresh plan — a plan that keeps growing after every result is usually a loop rather than progress.`,
+        )
+        return s
+      }
+      const grown = [...carry.steps, ...steps].slice(0, MAX_PLAN_STEPS)
+      const shape = chosen ?? carry.pattern
+      return {
+        plan: {
+          ...carry,
+          // A later reply may re-shape the job it is still in the middle of —
+          // that is the orchestrator-worker case, where what the work needs is
+          // only clear once some of it has run.
+          ...(chosen ? { pattern: chosen } : {}),
+          ...mismatch(fromNodeId, shape?.id, grown.length),
+          steps: grown,
+        },
+      }
+    }
 
     const node = s.nodes.find((n) => n.id === fromNodeId)
     // What was asked for, so a plan still makes sense hours later.
@@ -2454,7 +2705,14 @@ function proposePlan(fromNodeId: string, text: string) {
         ? (node.data.messages.filter((m) => m.role === 'user').at(-1)?.text ?? '')
         : ''
     return {
-      plan: { fromNodeId, goal: goal.slice(0, 240), steps, proposedAt: Date.now() },
+      plan: {
+        fromNodeId,
+        goal: goal.slice(0, 240),
+        steps,
+        proposedAt: Date.now(),
+        ...(chosen ? { pattern: chosen } : {}),
+        ...mismatch(fromNodeId, chosen?.id, steps.length),
+      },
     }
   })
 }
@@ -2463,7 +2721,7 @@ function proposePlan(fromNodeId: string, text: string) {
  * Run one approved step. Marks it running while its agent works, then done or
  * failed — a plan that ran is a record of what happened, not a blank slate.
  */
-async function runPlanStep(fromNodeId: string, stepId: string) {
+async function runPlanStep(fromNodeId: string, stepId: string, defer = false): Promise<string | null> {
   const patch = (fn: (s: PlanStep) => PlanStep) =>
     useStore.setState((s) =>
       s.plan
@@ -2472,15 +2730,62 @@ async function runPlanStep(fromNodeId: string, stepId: string) {
     )
 
   const step = useStore.getState().plan?.steps.find((x) => x.id === stepId)
-  if (!step || step.state !== 'pending') return
+  if (!step || step.state !== 'pending') return null
 
   patch((st) => ({ ...st, state: 'running', error: undefined }))
-  const result = await spawnChild(fromNodeId, step.persona, step.task)
+  const result = await spawnChild(fromNodeId, step.persona, step.task, defer)
   patch((st) =>
     result.ok
       ? { ...st, state: 'done', childId: result.childId }
       : { ...st, state: 'failed', error: result.error },
   )
+  return result.ok ? (result.report ?? null) : null
+}
+
+/**
+ * Every pending step at once, then one turn carrying all of their results.
+ *
+ * This is the whole reason the shape is asked for. Four independent reviews
+ * run sequentially cost four round trips of wall-clock for no benefit — none
+ * of them was going to read the others — and four separate hand-backs cost
+ * four orchestrator turns to read what one turn could read together.
+ *
+ * The steps are snapshotted before anything starts: the orchestrator writes
+ * more steps as results arrive, and those belong to the next round, not this
+ * one. Their agents are created synchronously inside `spawnChild` before it
+ * awaits anything, so the per-agent and per-canvas limits still see each other
+ * even though the turns overlap.
+ */
+async function runPlanFanout(fromNodeId: string) {
+  const approved = (useStore.getState().plan?.steps ?? [])
+    .filter((st) => st.state === 'pending')
+    .map((st) => st.id)
+  if (!approved.length) return
+
+  // Every approved step runs — but no more than MAX_FANOUT of them are in
+  // flight at once. Dropping the rest would be the app silently deciding the
+  // user approved less than they did; running eight agents at once is the
+  // spend this cap exists to bound. Waves are the only answer that does
+  // neither.
+  const reports: string[] = []
+  for (let i = 0; i < approved.length; i += MAX_FANOUT) {
+    const wave = approved.slice(i, i + MAX_FANOUT)
+    const done = await Promise.all(wave.map((id) => runPlanStep(fromNodeId, id, true)))
+    reports.push(...done.filter((r): r is string => !!r))
+  }
+  if (!reports.length) return
+
+  // Still on the canvas? A user who deleted the orchestrator while its workers
+  // ran has said what they think of the results.
+  const parent = useStore.getState().nodes.find((n) => n.id === fromNodeId)
+  if (!parent || parent.type !== 'session') return
+
+  await useStore
+    .getState()
+    .send(
+      fromNodeId,
+      `${reports.length} steps of your plan ran at the same time. All of their reports:\n\n${reports.join('\n\n')}`,
+    )
 }
 
 async function maybeDelegate(fromNodeId: string, text: string) {
