@@ -1229,7 +1229,9 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
             {
               id: `touch_${uid()}`,
               source: sessionNodeId,
+              sourceHandle: 'produces',
               target: existing.id,
+              targetHandle: 'touched-by',
               type: 'file',
               data: { write, at: Date.now() },
             },
@@ -1243,10 +1245,13 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
   ).length
   if (mine >= MAX_AUTO_FILES_PER_SESSION) return
 
+  // Directly below the agent, centred on it — the same column the layout would
+  // put it in, so a canvas with auto-tidy off still reads the right way.
   const width = (session.width as number | undefined) ?? 400
+  const height = (session.height as number | undefined) ?? 340
   const desired = {
-    x: session.position.x + width + 90,
-    y: session.position.y + mine * 92,
+    x: session.position.x + (width - 224) / 2,
+    y: session.position.y + height + 28 + mine * 92,
     w: 224,
     h: 64,
   }
@@ -1267,7 +1272,9 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
       {
         id: `touch_${uid()}`,
         source: sessionNodeId,
+        sourceHandle: 'produces',
         target: id,
+        targetHandle: 'touched-by',
         type: 'file',
         data: { write, at: Date.now() },
       },
@@ -1300,9 +1307,19 @@ function spawnTurnSummary(sessionNodeId: string, msg: Message) {
   )
   // Below the last one, so a summary never lands on top of its predecessor —
   // including after the user has dragged them around.
-  const bottom = mine.reduce((y, n) => Math.max(y, n.position.y), session.position.y - SUMMARY_STEP)
+  const sessionHeight = (session.height as number | undefined) ?? 340
+  const sessionWidth = (session.width as number | undefined) ?? 400
+  const bottom = mine.reduce(
+    (y, n) => Math.max(y, n.position.y),
+    session.position.y + sessionHeight - SUMMARY_STEP + 28,
+  )
   const pos = findFreeSpot(
-    { x: session.position.x - SUMMARY_GAP, y: bottom + SUMMARY_STEP, w: SUMMARY_W, h: SUMMARY_H },
+    {
+      x: session.position.x + (sessionWidth - SUMMARY_W) / 2,
+      y: bottom + SUMMARY_STEP,
+      w: SUMMARY_W,
+      h: SUMMARY_H,
+    },
     st.nodes.filter((n) => n.id !== sessionNodeId).map(boxOf),
   )
 
@@ -1330,7 +1347,7 @@ function spawnTurnSummary(sessionNodeId: string, msg: Message) {
       {
         id: `sum_${uid()}`,
         source: sessionNodeId,
-        sourceHandle: 'summary-out',
+        sourceHandle: 'produces',
         target: id,
         targetHandle: 'summarizes',
         type: 'summary',
@@ -1341,8 +1358,6 @@ function spawnTurnSummary(sessionNodeId: string, msg: Message) {
   }))
 }
 
-/** Horizontal offset of the summary column from the session's left edge. */
-const SUMMARY_GAP = 300
 /** Vertical pitch of the summary stack. */
 const SUMMARY_STEP = 116
 const SUMMARY_W = 260
@@ -1377,8 +1392,8 @@ async function recordMcpUse(sessionNodeId: string, server: string, tool: string)
       },
       findFreeSpot(
         {
-          x: session.position.x + ((session.width as number | undefined) ?? 400) + 90,
-          y: session.position.y - 220,
+          x: session.position.x - 240 - 90,
+          y: session.position.y,
           w: 240,
           h: 150,
         },
@@ -1429,7 +1444,12 @@ async function recordMcpUse(sessionNodeId: string, server: string, tool: string)
 
   const id = `node_${uid()}`
   const pos = findFreeSpot(
-    { x: serverNode.position.x + 280, y: serverNode.position.y + mine * 70, w: 200, h: 56 },
+    {
+      x: serverNode.position.x + 28,
+      y: serverNode.position.y + 150 + 28 + mine * 80,
+      w: 200,
+      h: 56,
+    },
     useStore.getState().nodes.map(boxOf),
   )
   useStore.setState((s) => ({
@@ -1444,10 +1464,41 @@ async function recordMcpUse(sessionNodeId: string, server: string, tool: string)
     ],
     edges: [
       ...s.edges,
-      { id: `use_${uid()}`, source: serverNode!.id, target: id, type: 'mcpuse' },
+      {
+        id: `use_${uid()}`,
+        source: serverNode!.id,
+        sourceHandle: 'tools-out',
+        target: id,
+        targetHandle: 'from-server',
+        type: 'mcpuse',
+      },
     ],
   }))
   markAutoPlaced(id)
+}
+
+/**
+ * Resolve when a session is no longer mid-turn.
+ *
+ * `subscribe` only fires on change, so subscribing to a session that is already
+ * idle waits forever — which is exactly what happened when the turn failed to
+ * start at all (no folder attached, say). The parent then never got its report
+ * and simply stopped, with nothing in the transcript to say why.
+ */
+function whenIdle(nodeId: string): Promise<void> {
+  const busy = (s: ReturnType<typeof useStore.getState>) => {
+    const n = s.nodes.find((x) => x.id === nodeId)
+    return !!n && n.type === 'session' && (n.data.state === 'thinking' || n.data.state === 'streaming')
+  }
+  if (!busy(useStore.getState())) return Promise.resolve()
+  return new Promise((resolve) => {
+    const stop = useStore.subscribe((s) => {
+      if (!busy(s)) {
+        stop()
+        resolve()
+      }
+    })
+  })
 }
 
 /** Hand a node to the layout. Only agent-created nodes are ever passed here. */
@@ -1455,8 +1506,68 @@ function markAutoPlaced(id: string) {
   useStore.setState((s) => ({ autoPlaced: new Set(s.autoPlaced).add(id) }))
 }
 
-const MAX_HOPS = 2
-const hops = new Map<string, number>()
+/**
+ * How deep the spawn chain may go: an orchestrator (0) may spawn workers (1),
+ * and those may spawn one more level (2). Beyond that a canvas can fan out
+ * into a bill nobody asked for.
+ *
+ * Measured by walking spawn edges up the graph rather than kept in a counter.
+ * The counter version incremented on every spawn and was only ever cleared
+ * when it tripped, so an orchestrator could spawn exactly twice and was then
+ * refused — silently, and for the rest of the session. Depth is a property of
+ * the graph, so reading it from the graph is the only version that can't drift.
+ */
+const MAX_SPAWN_DEPTH = 2
+
+/** Consecutive delegations from one agent before we force a pause. */
+const MAX_DELEGATE_CHAIN = 2
+const delegations = new Map<string, number>()
+
+/** Children one agent may spawn. Per agent, not per canvas. */
+const MAX_CHILDREN_PER_AGENT = 8
+
+/** A backstop on the whole canvas, so a spawn loop can't run up a bill. */
+const MAX_SESSIONS = 24
+
+export function spawnDepth(edges: Edge[], nodeId: string): number {
+  let depth = 0
+  let cur = nodeId
+  const seen = new Set<string>([cur])
+  for (;;) {
+    const up = edges.find((e) => e.type === 'spawn' && e.target === cur)
+    if (!up || seen.has(up.source)) return depth
+    seen.add(up.source)
+    cur = up.source
+    depth++
+  }
+}
+
+/**
+ * Tell the user why something didn't happen.
+ *
+ * Every refusal below used to be a bare `return`. The transcript still showed
+ * the agent's `SPAWN` line rendered as a spawn card, so the canvas claimed to
+ * have started an agent that does not exist — the one failure mode worse than
+ * failing.
+ */
+function noteOnNode(nodeId: string, text: string) {
+  useStore.setState((s) => ({
+    nodes: s.nodes.map((n) =>
+      n.id === nodeId && n.type === 'session'
+        ? {
+            ...n,
+            data: {
+              ...n.data,
+              messages: [
+                ...n.data.messages,
+                { id: uid(), role: 'system' as const, text, tools: [], error: true },
+              ],
+            },
+          }
+        : n,
+    ) as GtNode[],
+  }))
+}
 
 /**
  * Save personas the orchestrator invented. They go to the library rather than
@@ -1476,9 +1587,6 @@ async function maybeDefinePersonas(text: string) {
 
   await useStore.getState().setLibrary([...current, ...fresh])
 }
-
-/** A canvas full of agents spawning agents is a runaway bill. */
-const MAX_SPAWNED_CHILDREN = 6
 
 /**
  * The orchestrator creating a worker on demand — the point of the whole app.
@@ -1518,21 +1626,45 @@ async function maybeSpawn(fromNodeId: string, text: string) {
   const parent = st.nodes.find((n) => n.id === fromNodeId)
   if (!parent || parent.type !== 'session') return
 
-  const persona = rosterFor(st.nodes, st.edges, st.library, fromNodeId).find(
-    (p) => p.name.toLowerCase() === personalityName.toLowerCase(),
-  )
-  if (!persona) return
-
-  const depth = hops.get(fromNodeId) ?? 0
-  if (depth >= MAX_HOPS) {
-    hops.delete(fromNodeId)
+  const roster = rosterFor(st.nodes, st.edges, st.library, fromNodeId)
+  const persona = roster.find((p) => p.name.toLowerCase() === personalityName.toLowerCase())
+  if (!persona) {
+    const known = roster.map((p) => p.name).join(', ')
+    noteOnNode(
+      fromNodeId,
+      `Couldn't spawn "${personalityName}" — no persona by that name.` +
+        (known ? ` Available: ${known}.` : ' The persona library is empty.'),
+    )
     return
   }
 
-  const existingChildren = st.edges.filter((e) => e.type === 'spawn').length
-  if (existingChildren >= MAX_SPAWNED_CHILDREN) return
+  if (spawnDepth(st.edges, fromNodeId) >= MAX_SPAWN_DEPTH) {
+    noteOnNode(
+      fromNodeId,
+      `Couldn't spawn "${persona.name}" — already ${MAX_SPAWN_DEPTH} levels deep in spawned agents. Ask the orchestrator to run this itself, or start it from the top.`,
+    )
+    return
+  }
 
-  hops.set(fromNodeId, depth + 1)
+  // Per agent. This used to count every spawn edge on the canvas, so after six
+  // spawns in the canvas's whole life every later spawn was refused in silence.
+  const myChildren = st.edges.filter((e) => e.type === 'spawn' && e.source === fromNodeId).length
+  if (myChildren >= MAX_CHILDREN_PER_AGENT) {
+    noteOnNode(
+      fromNodeId,
+      `Couldn't spawn "${persona.name}" — this agent already has ${myChildren} children, the limit. Delete some from the canvas to make room.`,
+    )
+    return
+  }
+
+  const sessionCount = st.nodes.filter((n) => n.type === 'session').length
+  if (sessionCount >= MAX_SESSIONS) {
+    noteOnNode(
+      fromNodeId,
+      `Couldn't spawn "${persona.name}" — the canvas is at its limit of ${MAX_SESSIONS} agents.`,
+    )
+    return
+  }
 
   // A persona spawned straight from the library gets a node on the canvas,
   // wired to the orchestrator that used it. The graph stays the record of what
@@ -1598,7 +1730,14 @@ async function maybeSpawn(fromNodeId: string, text: string) {
     edges: [
       ...s.edges,
       // Lineage, so the canvas shows who created whom.
-      { id: `spawn_${uid()}`, source: fromNodeId, target: childId, type: 'spawn' },
+      {
+        id: `spawn_${uid()}`,
+        source: fromNodeId,
+        sourceHandle: 'produces',
+        target: childId,
+        targetHandle: 'spawned-by',
+        type: 'spawn',
+      },
       // Context both ways: the child reports back, the parent can follow up.
       { id: `ctx_${uid()}`, source: childId, target: fromNodeId, type: 'context' },
       { id: `ctx_${uid()}`, source: fromNodeId, target: childId, type: 'context' },
@@ -1623,15 +1762,7 @@ async function maybeSpawn(fromNodeId: string, text: string) {
     .getState()
     .send(childId, brief ? `${brief}\n\n---\n\n${task}` : task)
 
-  await new Promise<void>((resolve) => {
-    const stop = useStore.subscribe((s) => {
-      const c = s.nodes.find((n) => n.id === childId)
-      if (c && c.type === 'session' && c.data.state !== 'thinking' && c.data.state !== 'streaming') {
-        stop()
-        resolve()
-      }
-    })
-  })
+  await whenIdle(childId)
 
   const done = useStore.getState().nodes.find((n) => n.id === childId)
   const answer = done && done.type === 'session' ? (done.data.messages.at(-1)?.text ?? '') : ''
@@ -1654,13 +1785,20 @@ async function maybeDelegate(fromNodeId: string, text: string) {
   const [, targetName, task] = match
 
   // Without this, A delegates to B, B's answer prompts A to delegate again,
-  // and the canvas bills you forever.
-  const depth = hops.get(fromNodeId) ?? 0
-  if (depth >= MAX_HOPS) {
-    hops.delete(fromNodeId)
+  // and the canvas bills you forever. Unlike a spawn chain this isn't nesting —
+  // each hand-back is a fresh turn — so it can't be read off the graph. The
+  // counter clears when it trips, which forces a pause in a ping-pong rather
+  // than banning delegation outright.
+  const chained = delegations.get(fromNodeId) ?? 0
+  if (chained >= MAX_DELEGATE_CHAIN) {
+    delegations.delete(fromNodeId)
+    noteOnNode(
+      fromNodeId,
+      `Stopped delegating after ${MAX_DELEGATE_CHAIN} hand-offs in a row — that usually means two agents are passing the same task back and forth. Say what you want done next.`,
+    )
     return
   }
-  hops.set(fromNodeId, depth + 1)
+  delegations.set(fromNodeId, chained + 1)
 
   const s = useStore.getState()
   const from = s.nodes.find((n) => n.id === fromNodeId)
@@ -1681,15 +1819,7 @@ async function maybeDelegate(fromNodeId: string, text: string) {
   await useStore.getState().send(target.id, task.trim())
 
   // Wait for the delegate to finish, then hand the answer back.
-  await new Promise<void>((resolve) => {
-    const stop = useStore.subscribe((st) => {
-      const t = st.nodes.find((n) => n.id === target.id)
-      if (t && t.type === 'session' && t.data.state !== 'thinking' && t.data.state !== 'streaming') {
-        stop()
-        resolve()
-      }
-    })
-  })
+  await whenIdle(target.id)
 
   useStore.setState((st) => ({ edges: st.edges.filter((e) => e.id !== callId) }))
 

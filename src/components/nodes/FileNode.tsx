@@ -53,7 +53,7 @@ function FileNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'file'
       }
     >
       {/* Receives the touch edge from an agent; feeds context into a session. */}
-      <Handle type="target" position={Position.Left} id="touched-by" />
+      <Handle type="target" position={Position.Top} id="touched-by" />
       <Handle type="source" position={Position.Right} id="context-out" />
 
       <div className="flex items-center gap-2 px-2 py-1.5">

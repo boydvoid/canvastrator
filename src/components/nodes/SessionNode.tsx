@@ -224,14 +224,16 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
     >
       <NodeResizer minWidth={300} minHeight={220} lineClassName="opacity-0" handleClassName="opacity-0" />
 
-      {/* Left to right: everything that configures a session enters on the
-          left, everything it produces leaves on the right. */}
+      {/* Two axes, two meanings. Sideways is configuration: what the user
+          wires in to set the session up, and context passed between peers on
+          the same row. Downward is the flow itself — what this agent spawned
+          and what it produced. Keep the sideways handles first: edges that
+          don't name a handle fall through to the first of their type. */}
       <Handle type="target" position={Position.Left} id="context-in" style={{ top: 34 }} />
       <Handle type="target" position={Position.Left} id="attach" style={{ top: 62 }} />
       <Handle type="source" position={Position.Right} id="context-out" style={{ top: 34 }} />
-      {/* Turn summaries hang off the left, below the context handle, so they
-          stack clear of the file nodes the agent spawns on its right. */}
-      <Handle type="source" position={Position.Right} id="summary-out" style={{ top: 62 }} />
+      <Handle type="target" position={Position.Top} id="spawned-by" />
+      <Handle type="source" position={Position.Bottom} id="produces" />
 
       {/* header */}
       <header className="flex shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5">

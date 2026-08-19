@@ -35,7 +35,7 @@ function assertNoOverlaps(nodes: GtNode[], placed: Record<string, { x: number; y
 }
 
 describe('layoutCanvas', () => {
-  it('puts a folder left of its session and files right of it', () => {
+  it('puts a folder beside its session and the files below it', () => {
     const nodes = [session('s1'), folder('f1'), file('a'), file('b')]
     const edges = [
       edge('f1', 's1', 'cwd'),
@@ -44,8 +44,9 @@ describe('layoutCanvas', () => {
     ]
     const p = layoutCanvas(nodes, edges)
     expect(p.f1.x).toBeLessThan(p.s1.x)
-    expect(p.a.x).toBeGreaterThan(p.s1.x)
-    expect(p.b.x).toBeGreaterThan(p.s1.x)
+    // Files hang under the agent that touched them, in its column.
+    expect(p.a.y).toBeGreaterThan(p.s1.y + 340)
+    expect(p.b.y).toBeGreaterThan(p.a.y)
     assertNoOverlaps(nodes, p)
   })
 
@@ -58,13 +59,98 @@ describe('layoutCanvas', () => {
     assertNoOverlaps(nodes, p)
   })
 
-  it('hangs spawned children below and indented from their parent', () => {
+  it('hangs a spawned child below its parent, not beside it', () => {
     const nodes = [session('parent'), session('child')]
     const edges = [edge('parent', 'child', 'spawn')]
     const p = layoutCanvas(nodes, edges)
     expect(p.child.y).toBeGreaterThan(p.parent.y + 340)
-    expect(p.child.x).toBeGreaterThan(p.parent.x)
+    // An only child sits directly under the parent.
+    expect(p.child.x).toBe(p.parent.x)
     assertNoOverlaps(nodes, p)
+  })
+
+  /** The shape in the reference: one orchestrator, a row of agents beneath. */
+  it('spreads siblings across a row and centres the parent over them', () => {
+    const nodes = [session('orch'), session('a'), session('b'), session('c')]
+    const edges = ['a', 'b', 'c'].map((c) => edge('orch', c, 'spawn'))
+    const p = layoutCanvas(nodes, edges)
+
+    // All three on the same row, left to right, below the orchestrator.
+    expect(p.a.y).toBe(p.b.y)
+    expect(p.b.y).toBe(p.c.y)
+    expect(p.a.y).toBeGreaterThan(p.orch.y + 340)
+    expect(p.a.x).toBeLessThan(p.b.x)
+    expect(p.b.x).toBeLessThan(p.c.x)
+
+    // The orchestrator sits over the middle of the row.
+    const rowCentre = (p.a.x + p.c.x + 400) / 2
+    expect(Math.abs(p.orch.x + 200 - rowCentre)).toBeLessThanOrEqual(1)
+    assertNoOverlaps(nodes, p)
+  })
+
+  it('keeps each agent\'s files in that agent\'s own column', () => {
+    const nodes = [session('orch'), session('a'), session('b'), file('af'), file('bf')]
+    const edges = [
+      edge('orch', 'a', 'spawn'),
+      edge('orch', 'b', 'spawn'),
+      edge('a', 'af', 'file'),
+      edge('b', 'bf', 'file'),
+    ]
+    const p = layoutCanvas(nodes, edges)
+    // Centred under its own agent, and clear of the neighbouring column.
+    expect(Math.abs(p.af.x + 112 - (p.a.x + 200))).toBeLessThanOrEqual(1)
+    expect(Math.abs(p.bf.x + 112 - (p.b.x + 200))).toBeLessThanOrEqual(1)
+    expect(p.af.x).toBeLessThan(p.b.x)
+    assertNoOverlaps(nodes, p)
+  })
+
+  it('tucks a server\'s tool nodes under the server, not in the orphan row', () => {
+    const nodes: GtNode[] = [
+      session('s1'),
+      { id: 'mcp1', type: 'mcp', position: { x: 0, y: 0 }, data: {} } as never,
+      { id: 'tool1', type: 'mcptool', position: { x: 0, y: 0 }, data: {} } as never,
+    ]
+    const edges = [edge('mcp1', 's1', 'attach'), edge('mcp1', 'tool1', 'mcpuse')]
+    const p = layoutCanvas(nodes, edges)
+    expect(p.tool1.y).toBeGreaterThan(p.mcp1.y)
+    expect(p.tool1.x).toBeGreaterThanOrEqual(p.mcp1.x)
+    expect(p.tool1.x).toBeLessThan(p.s1.x)
+    assertNoOverlaps(nodes, p)
+  })
+
+  /**
+   * Pins the dagre ordering workaround. If a dagre upgrade stops reversing
+   * sibling order, this fails rather than silently mirroring every canvas.
+   */
+  it('orders siblings by spawn order, left to right', () => {
+    const kids = ['a', 'b', 'c', 'd', 'e']
+    const nodes = [session('orch'), ...kids.map((k) => session(k))]
+    const edges = kids.map((k) => edge('orch', k, 'spawn'))
+    const p = layoutCanvas(nodes, edges)
+    const byX = [...kids].sort((l, r) => p[l].x - p[r].x)
+    expect(byX).toEqual(kids)
+  })
+
+  it('keeps a grandchild under its own parent, not the orchestrator', () => {
+    const nodes = ['orch', 'a', 'b', 'a1', 'a2'].map((id) => session(id))
+    const edges = [
+      edge('orch', 'a', 'spawn'),
+      edge('orch', 'b', 'spawn'),
+      edge('a', 'a1', 'spawn'),
+      edge('a', 'a2', 'spawn'),
+    ]
+    const p = layoutCanvas(nodes, edges)
+    expect(p.a1.y).toBeGreaterThan(p.a.y + 340)
+    expect(p.a1.x).toBeLessThan(p.a2.x)
+    // `a` sits over the middle of its own two children.
+    expect(Math.abs(p.a.x - (p.a1.x + p.a2.x) / 2)).toBeLessThanOrEqual(1)
+    assertNoOverlaps(nodes, p)
+  })
+
+  it('does not recurse forever on a spawn cycle', () => {
+    const nodes = [session('a'), session('b')]
+    const edges = [edge('a', 'b', 'spawn'), edge('b', 'a', 'spawn')]
+    expect(() => layoutCanvas(nodes, edges)).not.toThrow()
   })
 
   it('keeps a whole squad clear of itself', () => {
@@ -140,13 +226,13 @@ describe('layoutCanvas — ownership', () => {
     const nodes = [session('s1', 1000, 2000), file('f', 0, 0)]
     const edges = [edge('s1', 'f', 'file')]
     const placed = layoutCanvas(nodes, edges, new Set(['f']))
-    // To the right of the session's real position, not the layout's idea of it.
-    expect(placed.f.x).toBeGreaterThan(1000)
-    expect(placed.f.y).toBeGreaterThanOrEqual(2000)
+    // Below the session's real position, not the layout's idea of it.
+    expect(placed.f.y).toBeGreaterThan(2000 + 340)
+    expect(placed.f.x).toBeGreaterThanOrEqual(1000)
   })
 
   it('moves an agent node clear of a user node it would have landed on', () => {
-    const nodes = [session('s1', 0, 0), file('blocker', 490, 0), file('f', 0, 0)]
+    const nodes = [session('s1', 0, 0), file('blocker', 88, 368), file('f', 0, 0)]
     const edges = [edge('s1', 'f', 'file')]
     const placed = layoutCanvas(nodes, edges, new Set(['f']))
     const b = boxOf(nodes[1])

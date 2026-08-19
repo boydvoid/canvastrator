@@ -90,6 +90,11 @@ export function splitAgentText(text: string): Segment[] {
 
 function SpawnCard({ name, task }: { name: string; task: string }) {
   // Link the card to the agent it produced, if that agent is still around.
+  //
+  // The card is built from the reply text, so it renders whether or not the
+  // spawn actually succeeded. When no agent by this name exists it has to say
+  // so: claiming to have started an agent that was never created sent the user
+  // looking for a node that isn't on the canvas.
   const target = useStore((s) =>
     s.nodes.find(
       (n) => n.type === 'session' && n.data.name.toLowerCase().startsWith(name.toLowerCase()),
@@ -111,8 +116,11 @@ function SpawnCard({ name, task }: { name: string; task: string }) {
     >
       <div className="flex items-center gap-1.5 border-b border-line-soft px-2 py-1">
         <UserRoundPlus size={11} className="shrink-0 text-fg-muted" style={{ color: accent }} />
-        <span className="font-mono text-[10.5px] tracking-wide text-fg-muted uppercase">
-          spawned
+        <span
+          className="font-mono text-[10.5px] tracking-wide text-fg-muted uppercase"
+          title={target ? undefined : 'No agent by this name is on the canvas'}
+        >
+          {target ? 'spawned' : 'spawn failed'}
         </span>
         <button
           onClick={() => target && setChatTarget(target.id)}

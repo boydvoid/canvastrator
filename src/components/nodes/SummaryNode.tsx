@@ -46,7 +46,7 @@ function SummaryNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'su
       {/* Written to by its session; never wired anywhere itself. */}
       {/* An account of a turn is an output, so it hangs off the right
           like the files that turn touched. */}
-      <Handle type="target" position={Position.Left} id="summarizes" />
+      <Handle type="target" position={Position.Top} id="summarizes" />
 
       <div className="flex items-center gap-2 px-2 py-1.5">
         <ScrollText size={11} className="shrink-0" style={{ color: accent }} />
