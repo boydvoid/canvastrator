@@ -1,5 +1,12 @@
 import { deleteCanvasDoc, listCanvases, loadCanvasDoc, saveCanvasDoc } from './bridge'
-import { CANVAS_VERSION, deserializeCanvas, serializeCanvas, type CanvasMeta } from './persist'
+import {
+  CANVAS_VERSION,
+  deserializeCanvas,
+  serializeCanvas,
+  strandedPersonas,
+  type CanvasMeta,
+} from './persist'
+import { personaFromNode } from './library'
 import { justWentQuiet, playDone } from './chime'
 import { useStore } from './store'
 
@@ -139,6 +146,7 @@ export async function openCanvas(id: string): Promise<boolean> {
   }
 
   const restored = deserializeCanvas(doc.data)
+  rescuePersonas(doc.data)
   rememberLast(doc.id)
   suppress(() =>
     useStore.setState({
@@ -156,6 +164,25 @@ export async function openCanvas(id: string): Promise<boolean> {
     }),
   )
   return true
+}
+
+/**
+ * Move any persona defined on an old canvas into the library before the node
+ * carrying it is dropped. Matched by name, so opening the same canvas twice
+ * doesn't duplicate anything, and a persona the user has since edited in the
+ * library wins over the stale copy on the canvas.
+ */
+function rescuePersonas(data: Parameters<typeof strandedPersonas>[0]) {
+  const stranded = strandedPersonas(data)
+  if (!stranded.length) return
+
+  const library = useStore.getState().library
+  const known = new Set(library.map((p) => p.name.trim().toLowerCase()))
+  const fresh = stranded
+    .filter((d) => !known.has(d.name.trim().toLowerCase()))
+    .filter((d, i, all) => all.findIndex((x) => x.name === d.name) === i)
+    .map(personaFromNode)
+  if (fresh.length) void useStore.getState().setLibrary([...library, ...fresh])
 }
 
 /** Start over. The canvas on disk, if any, is left alone. */

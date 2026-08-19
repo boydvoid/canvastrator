@@ -1,6 +1,7 @@
 import type { Edge } from '@xyflow/react'
+import { SESSION_SIZE } from './layout'
 import type { GtNode } from './store'
-import type { ContextEntry, Message } from './types'
+import type { ContextEntry, Message, Notification, PersonalityNodeData } from './types'
 
 /** Bumped when the saved shape changes in a way older files can't satisfy. */
 export const CANVAS_VERSION = 1
@@ -43,6 +44,7 @@ export type CanvasData = {
   autoPlaced?: string[]
   /** Free-text rules every agent on this canvas is spawned with. */
   globalRules?: string
+  notifications?: Notification[]
 }
 
 /** The slice of the store a canvas is made of. */
@@ -54,6 +56,7 @@ export type CanvasSnapshot = {
   cwd: string
   autoPlaced: Set<string>
   globalRules: string
+  notifications: Notification[]
 }
 
 /**
@@ -121,6 +124,7 @@ export function serializeCanvas(s: CanvasSnapshot): CanvasData {
     // be the reason a canvas fails to save.
     autoPlaced: [...(s.autoPlaced ?? [])].filter((id) => ids.has(id)),
     globalRules: s.globalRules ?? '',
+    notifications: s.notifications ?? [],
   }
 }
 
@@ -128,10 +132,32 @@ export function serializeCanvas(s: CanvasSnapshot): CanvasData {
  * Rebuild the store slice from a file. Deliberately forgiving: a canvas that
  * lost a node to a bad write should open with what's left, not refuse to open.
  */
+/**
+ * Personas stranded on an older canvas.
+ *
+ * Personality nodes are gone — a persona is edited on the agent it configures,
+ * and the reusable templates live in the library. But canvases saved before
+ * that still carry them, and a user who defined "reviewer" by right-clicking
+ * the canvas never put it in the library. Dropping those nodes without
+ * rescuing what they held would delete the user's work, so the load path
+ * hoists them first.
+ */
+export function strandedPersonas(data: CanvasData | null | undefined): PersonalityNodeData[] {
+  return (data?.nodes ?? [])
+    .filter((n) => (n?.type as string) === 'personality' && n.data && typeof n.data === 'object')
+    .map((n) => n.data as PersonalityNodeData)
+    .filter((d) => typeof d.name === 'string' && d.name.trim() !== '')
+}
+
 export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSnapshot {
   const nodes = (data?.nodes ?? []).filter(
     (n): n is SavedNode => !!n && typeof n.id === 'string' && typeof n.type === 'string',
   )
+  // Personality and summary nodes no longer exist. `strandedPersonas` rescues
+  // what the first kind held; a turn summary is only worth reading while the
+  // turn is recent, so those simply go. The attach and summary edges that
+  // wired them in fall out with the dangling-edge filter below.
+  .filter((n) => !['personality', 'summary'].includes(n.type as string))
 
   const ids = new Set(nodes.map((n) => n.id))
 
@@ -145,6 +171,13 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
         ...(n.height ? { height: n.height } : {}),
         data: n.data,
       } as GtNode
+      // Agent nodes used to be resizable transcript windows, so canvases saved
+      // then carry whatever size the user dragged them to. They are labels
+      // now: one size, or an old canvas opens full of empty boxes.
+      if (node.type === 'session') {
+        node.width = SESSION_SIZE.w
+        node.height = SESSION_SIZE.h
+      }
       // Belt and braces: files written before settleSession existed, or edited
       // by hand, must still open in a usable state.
       if (node.type === 'session') node.data = settleSession(node.data)
@@ -164,5 +197,11 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
     // Absent in canvases saved before this existed, and empty means the same
     // thing it does when the user clears the field: inject nothing.
     globalRules: data?.globalRules ?? '',
+    // Absent before the bell existed. The summary nodes these replaced are
+    // dropped above; their content isn't rescued, because a turn's headline is
+    // only useful while the turn is recent.
+    notifications: (data?.notifications ?? []).filter(
+      (n): n is Notification => !!n && typeof n.id === 'string',
+    ),
   }
 }

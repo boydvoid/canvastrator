@@ -9,7 +9,6 @@ export type CanvasAction =
   | 'folder'
   | 'file'
   | 'skill'
-  | 'personality'
   | 'tidy'
   | 'rules'
   | 'delete'
@@ -23,7 +22,6 @@ const KEYS: Record<string, CanvasAction> = {
   f: 'folder',
   d: 'file',
   k: 'skill',
-  p: 'personality',
   t: 'tidy',
   g: 'rules',
   delete: 'delete',
@@ -36,7 +34,6 @@ export const SHORTCUT_LABEL: Record<CanvasAction, string> = {
   folder: 'F',
   file: 'D',
   skill: 'K',
-  personality: 'P',
   tidy: 'T',
   rules: 'G',
   delete: '⌫',

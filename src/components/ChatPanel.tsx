@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDown, Hexagon } from 'lucide-react'
+import { useShallow } from 'zustand/react/shallow'
+import { ArrowDown, Hexagon, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { Composer } from '@/components/Composer'
 import { AgentMessage } from '@/components/AgentMessage'
 import { RunningStatus } from '@/components/RunningStatus'
@@ -11,12 +12,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Button } from '@/components/ui/button'
 import { canvasFilesFor, resolveCwd, searchRootsFor, useStore, type GtNode } from '@/lib/store'
 import {
   EFFORTS,
   EFFORT_HINT,
   MODEL_OPTIONS,
   modelLabel,
+  PERMISSION_HINT,
   PERMISSION_LABEL,
   PROVIDER_ACCENT,
   PROVIDER_LABEL,
@@ -176,6 +179,91 @@ function EffortMenu({ node }: { node: GtNode & { type: 'session' } }) {
 }
 
 /**
+ * Everything about an agent that used to be printed on its node.
+ *
+ * The node is a label now, so this is where a name is changed, a standing brief
+ * is written, and an agent is deleted — one place per setting, next to the
+ * conversation it affects.
+ */
+function SessionSettings({ node }: { node: GtNode & { type: 'session' } }) {
+  const rename = useStore((s) => s.renameSession)
+  const setPermission = useStore((s) => s.setPermission)
+  const setInstructions = useStore((s) => s.setInstructions)
+  const removeNode = useStore((s) => s.removeNode)
+  const skills = useStore(
+    useShallow((s) =>
+      s.nodes.filter(
+        (n): n is GtNode & { type: 'skill' } =>
+          n.type === 'skill' && node.data.skillIds.includes(n.data.skillId),
+      ),
+    ),
+  )
+  const d = node.data
+
+  return (
+    <div className="shrink-0 space-y-2 border-b border-line-soft bg-surface/30 px-2.5 py-2">
+      <div className="flex items-center gap-1.5">
+        <span className="shrink-0 font-mono text-[10px] text-fg-faint">name</span>
+        <input
+          value={d.name}
+          onChange={(e) => rename(node.id, e.target.value)}
+          spellCheck={false}
+          className="min-w-0 flex-1 rounded border border-line bg-canvas px-1.5 py-0.5 font-mono text-[11px] text-fg outline-none focus:border-line-strong"
+        />
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => removeNode(node.id)}
+          title="Delete this agent"
+        >
+          <Trash2 size={12} />
+        </Button>
+      </div>
+
+      <div className="flex items-center gap-1">
+        <span className="shrink-0 font-mono text-[10px] text-fg-faint">access</span>
+        <div className="flex min-w-0 flex-1 flex-wrap gap-1">
+          {PERMISSIONS.map((p) => (
+            <button
+              key={p}
+              onClick={() => setPermission(node.id, p)}
+              title={PERMISSION_HINT[p]}
+              className={cn(
+                'rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors',
+                d.permission === p ? 'bg-surface-3 text-fg' : 'text-fg-subtle hover:bg-surface',
+              )}
+            >
+              {PERMISSION_LABEL[p]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <textarea
+        value={d.instructions ?? ''}
+        onChange={(e) => setInstructions(node.id, e.target.value)}
+        placeholder="Standing brief — sent with every turn. e.g. You review code. Read what you are pointed at and report only."
+        spellCheck={false}
+        className="h-20 w-full resize-none rounded border border-line bg-canvas px-1.5 py-1 font-mono text-[10.5px] leading-relaxed text-fg-muted outline-none placeholder:text-fg-faint focus:border-line-strong focus:text-fg"
+      />
+
+      {skills.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {skills.map((sk) => (
+            <span
+              key={sk.id}
+              className="rounded bg-surface px-1.5 py-0.5 font-mono text-[10px] text-fg-muted"
+            >
+              {sk.data.name}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
  * Chat with any agent on the canvas without hunting for its node.
  *
  * The node transcripts and this one are the same conversation — both read the
@@ -200,6 +288,10 @@ export function ChatPanel() {
     sessions.find((n) => n.id === chatTarget) ??
     sessions.find((n) => n.data.role === 'orchestrator') ??
     sessions[0]
+
+  // Collapsed by default: this is configuration, and the conversation is why
+  // the panel is open at all.
+  const [showSettings, setShowSettings] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
@@ -312,7 +404,19 @@ export function ChatPanel() {
             {d.notice.label}
           </span>
         )}
+        <button
+          onClick={() => setShowSettings((v) => !v)}
+          title={showSettings ? 'Hide settings' : 'Name, access, standing brief'}
+          className={cn(
+            'shrink-0 rounded p-1 hover:bg-surface',
+            showSettings ? 'text-fg' : 'text-fg-subtle hover:text-fg-muted',
+          )}
+        >
+          <SlidersHorizontal size={12} />
+        </button>
       </div>
+
+      {showSettings && <SessionSettings node={active} />}
 
       {busy && (
         <div className="shrink-0 border-b border-line-soft px-2.5 py-1">

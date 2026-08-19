@@ -166,12 +166,37 @@ body {
 .react-flow__node {
   cursor: default;
 }
-/* Session nodes saved before they carried a size: without this they'd size to
-   their transcript and grow without limit. React Flow writes width/height
-   inline once a node has been resized, which overrides this. */
+/* An agent node is a label, not a window. Pinned here as well as on the node
+   so a canvas saved before the size existed opens at the right one. */
 .react-flow__node-session {
-  width: 400px;
-  height: 340px;
+  width: 260px;
+  height: 64px;
+}
+/* Files are chips. Sized here rather than on each node so the layout's idea of
+   a file's box and the rendered box can't drift apart. */
+.react-flow__node-file {
+  width: 196px;
+  height: 38px;
+}
+
+/* Selecting a node answers "what is this wired to?": its connectors and their
+   far ends stay lit, everything else steps back. Opacity rather than colour,
+   so an edge still says what kind of edge it is while it is dimmed. */
+.react-flow__node.gt-faded,
+.react-flow__edge.gt-wire-faded {
+  opacity: 0.18;
+}
+.react-flow__node.gt-linked {
+  outline: 1px solid var(--color-line-strongest);
+  outline-offset: 3px;
+  border-radius: 14px;
+}
+.react-flow__edge.gt-wire-lit .react-flow__edge-path {
+  stroke-width: 2.4px;
+}
+.react-flow__node,
+.react-flow__edge {
+  transition: opacity 160ms ease;
 }
 .react-flow__handle {
   width: 9px;

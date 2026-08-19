@@ -36,6 +36,7 @@ const snapshot = (nodes: GtNode[], edges: Edge[] = []) => ({
   cwd: '/tmp',
   autoPlaced: new Set<string>(),
   globalRules: '',
+  notifications: [],
 })
 
 describe('serializeCanvas', () => {

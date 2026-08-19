@@ -26,7 +26,7 @@ function McpToolNodeInner({ data, selected }: NodeProps<GtNode & { type: 'mcptoo
       )}
       style={{ '--accent': 'var(--color-live)' } as React.CSSProperties}
     >
-      <Handle type="target" position={Position.Top} id="from-server" />
+      <Handle type="target" position={Position.Left} id="from-server" />
       <Wrench size={11} className="shrink-0 text-fg-muted" />
       <div className="min-w-0 flex-1">
         <div className="truncate font-mono text-[11px] text-fg" title={`${d.server} · ${d.tool}`}>

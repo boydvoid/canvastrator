@@ -14,7 +14,9 @@ describe('keyToCanvasAction', () => {
     expect(keyToCanvasAction({ key: 'f' })).toBe('folder')
     expect(keyToCanvasAction({ key: 'd' })).toBe('file')
     expect(keyToCanvasAction({ key: 'k' })).toBe('skill')
-    expect(keyToCanvasAction({ key: 'p' })).toBe('personality')
+    // `p` is deliberately unbound: personality nodes are gone, and a key that
+    // silently does nothing is better than one rebound under the user's hands.
+    expect(keyToCanvasAction({ key: 'p' })).toBeNull()
     expect(keyToCanvasAction({ key: 't' })).toBe('tidy')
     expect(keyToCanvasAction({ key: 'g' })).toBe('rules')
   })
@@ -41,7 +43,7 @@ describe('keyToCanvasAction', () => {
   })
 
   it('has a label for every action it maps', () => {
-    for (const key of ['s', 'f', 'd', 'k', 'p', 't', 'g', 'Delete']) {
+    for (const key of ['s', 'f', 'd', 'k', 't', 'g', 'Delete']) {
       const action = keyToCanvasAction({ key })!
       expect(SHORTCUT_LABEL[action]).toBeTruthy()
     }

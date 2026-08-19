@@ -1,7 +1,6 @@
 import { memo, useEffect, useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
-import { FileCode2, FilePen, Trash2 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { FileCode2, FilePen } from 'lucide-react'
 import { useFileActivity } from '@/lib/activity'
 import { basename, useStore, type GtNode } from '@/lib/store'
 import type { FileNodeData } from '@/lib/types'
@@ -14,9 +13,16 @@ const size = (b?: number) => {
   return `${(b / 1024 / 1024).toFixed(1)} MB`
 }
 
+/**
+ * A file an agent touched — a chip, not a card.
+ *
+ * A working agent puts a dozen of these under itself, and at the old two-line
+ * size that column was taller than the rest of the flow put together. Name,
+ * icon, and whether something is happening to it right now is the whole job;
+ * the path, the size and the contents are one click away in the viewer.
+ */
 function FileNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'file' }>) {
   const d = data as FileNodeData
-  const removeNode = useStore((s) => s.removeNode)
   const openFile = useStore((s) => s.openFile)
   // What an agent is doing to this file right now, if anything.
   const activity = useFileActivity(id)
@@ -37,7 +43,7 @@ function FileNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'file'
   return (
     <div
       className={cn(
-        'gt-spawn w-56 rounded-lg border bg-panel/90 backdrop-blur transition-colors',
+        'gt-spawn flex h-full w-full items-center gap-1.5 rounded-lg border bg-panel/90 px-2 backdrop-blur transition-colors',
         selected ? 'border-line-strongest' : 'border-line',
         // A sustained breath for as long as the agent is on this file; the
         // one-shot flash still marks each individual touch.
@@ -53,48 +59,36 @@ function FileNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'file'
       }
     >
       {/* Receives the touch edge from an agent; feeds context into a session. */}
-      <Handle type="target" position={Position.Top} id="touched-by" />
+      <Handle type="target" position={Position.Left} id="touched-by" />
       <Handle type="source" position={Position.Right} id="context-out" />
 
-      <div className="flex items-center gap-2 px-2 py-1.5">
-        {d.written ? (
-          <FilePen size={12} className="shrink-0 text-[var(--color-live)]" />
-        ) : (
-          <FileCode2 size={12} className="shrink-0 text-fg-subtle" />
-        )}
-        <button
-          onClick={() => openFile(d.path)}
-          className="min-w-0 flex-1 truncate text-left font-mono text-[11.5px] text-fg hover:underline"
-          title={`${d.path}\nClick to open`}
-        >
-          {basename(d.path)}
-        </button>
-        <Button variant="ghost" size="icon" onClick={() => removeNode(id)}>
-          <Trash2 size={11} />
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-2 border-t border-line-soft px-2 py-1 font-mono text-[9.5px] text-fg-faint">
-        {activity ? (
-          <span
-            className="flex items-center gap-1"
-            style={{ color: accent }}
-          >
-            <span className="gt-caret h-1 w-1 rounded-full" style={{ background: accent }} />
-            {activity === 'write' ? 'writing…' : 'reading…'}
-          </span>
-        ) : (
-          <span>{d.origin === 'agent' ? (d.written ? 'written' : 'read') : 'attached'}</span>
-        )}
-        {d.binary && <span>binary</span>}
-        <span className="ml-auto">{size(d.bytes)}</span>
-      </div>
-
-      {d.error && (
-        <p className="border-t border-line-soft px-2 py-1 font-mono text-[9.5px] text-[var(--color-danger)]">
-          {d.error}
-        </p>
+      {d.written ? (
+        <FilePen size={11} className="shrink-0 text-[var(--color-live)]" />
+      ) : (
+        <FileCode2 size={11} className="shrink-0 text-fg-subtle" />
       )}
+      <button
+        onClick={() => openFile(d.path)}
+        className="min-w-0 flex-1 truncate text-left font-mono text-[11px] text-fg hover:underline"
+        title={[
+          d.path,
+          d.error ?? (d.origin === 'agent' ? (d.written ? 'written' : 'read') : 'attached'),
+          size(d.bytes),
+          'Click to open',
+        ]
+          .filter(Boolean)
+          .join('\n')}
+      >
+        {basename(d.path)}
+      </button>
+      {activity && (
+        <span
+          className="gt-caret h-1.5 w-1.5 shrink-0 rounded-full"
+          style={{ background: accent }}
+          title={activity === 'write' ? 'writing…' : 'reading…'}
+        />
+      )}
+      {d.error && <span className="shrink-0 text-[10px] text-[var(--color-danger)]">!</span>}
     </div>
   )
 }

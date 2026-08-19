@@ -30,9 +30,9 @@ function McpNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'mcp' }
       )}
     >
       {/* Wire into a session to grant it this server's tools. */}
-      <Handle type="source" position={Position.Right} id="mcp-out" />
+      <Handle type="source" position={Position.Right} id="mcp-out" style={{ top: '30%' }} />
       {/* Tool nodes appear under the server that served them. */}
-      <Handle type="source" position={Position.Bottom} id="tools-out" />
+      <Handle type="source" position={Position.Right} id="tools-out" style={{ top: '70%' }} />
 
       <header className="flex items-center gap-2 border-b border-line-soft px-2.5 py-1.5">
         <Plug size={12} className={cn('shrink-0', STATUS_TONE[d.status ?? ''] ?? 'text-fg-subtle')} />

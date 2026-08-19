@@ -1,8 +1,13 @@
 import { useEffect, useState } from 'react'
-import { BaseEdge, getBezierPath, type EdgeProps } from '@xyflow/react'
+import { BaseEdge, getSmoothStepPath, type EdgeProps } from '@xyflow/react'
 import { useTouchLive } from '@/lib/activity'
 import { useStore } from '@/lib/store'
 import { PROVIDER_ACCENT } from '@/lib/types'
+
+/* Every edge is an orthogonal step rather than a bezier. On a left-to-right
+   flow a bezier between two distant ranks bows out into a long S that crosses
+   every other edge on the way; a step follows the lanes the layout already
+   laid out, so a busy canvas reads as wiring instead of spaghetti. */
 
 /** Edges take the accent of whichever provider is sending along them. */
 function useSourceAccent(source: string) {
@@ -24,13 +29,14 @@ export function ContextEdge({
   targetPosition,
   data,
 }: EdgeProps) {
-  const [path] = getBezierPath({
+  const [path] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
     sourcePosition,
     targetPosition,
+    borderRadius: 12,
   })
   const accent = useSourceAccent(source)
   const flowing = (data as { flowing?: number } | undefined)?.flowing
@@ -67,13 +73,14 @@ export function AttachEdge({
   sourcePosition,
   targetPosition,
 }: EdgeProps) {
-  const [path] = getBezierPath({
+  const [path] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
     sourcePosition,
     targetPosition,
+    borderRadius: 12,
   })
   return (
     <BaseEdge
@@ -99,13 +106,14 @@ export function CallEdge({
   sourcePosition,
   targetPosition,
 }: EdgeProps) {
-  const [path] = getBezierPath({
+  const [path] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
     sourcePosition,
     targetPosition,
+    borderRadius: 12,
   })
   const accent = useSourceAccent(source)
   return (
@@ -128,13 +136,14 @@ export function CwdEdge({
   sourcePosition,
   targetPosition,
 }: EdgeProps) {
-  const [path] = getBezierPath({
+  const [path] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
     sourcePosition,
     targetPosition,
+    borderRadius: 12,
   })
   return (
     <BaseEdge id={id} path={path} style={{ stroke: 'var(--color-edge-muted)', strokeWidth: 1.6 }} />
@@ -154,13 +163,14 @@ export function FileEdge({
   targetPosition,
   data,
 }: EdgeProps) {
-  const [path] = getBezierPath({
+  const [path] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
     sourcePosition,
     targetPosition,
+    borderRadius: 12,
   })
   const { write, at } = (data ?? {}) as { write?: boolean; at?: number }
   // Live while the touching agent is still in the turn that touched it: the
@@ -194,13 +204,14 @@ export function SpawnEdge({
   sourcePosition,
   targetPosition,
 }: EdgeProps) {
-  const [path] = getBezierPath({
+  const [path] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
     sourcePosition,
     targetPosition,
+    borderRadius: 12,
   })
   const accent = useSourceAccent(source)
   return (
@@ -215,40 +226,6 @@ export function SpawnEdge({
   )
 }
 
-/** Session → its own turn summary. Structural and quiet, like a cwd edge,
- *  but tinted with the provider so you can see whose turn it was. */
-export function SummaryEdge({
-  id,
-  source,
-  sourceX,
-  sourceY,
-  targetX,
-  targetY,
-  sourcePosition,
-  targetPosition,
-}: EdgeProps) {
-  const [path] = getBezierPath({
-    sourceX,
-    sourceY,
-    targetX,
-    targetY,
-    sourcePosition,
-    targetPosition,
-  })
-  const accent = useSourceAccent(source)
-  return (
-    <BaseEdge
-      id={id}
-      path={path}
-      style={{
-        stroke: `color-mix(in oklch, ${accent} 35%, transparent)`,
-        strokeWidth: 1.2,
-        strokeDasharray: '2 4',
-      }}
-    />
-  )
-}
-
 export const edgeTypes = {
   context: ContextEdge,
   attach: AttachEdge,
@@ -257,5 +234,4 @@ export const edgeTypes = {
   spawn: SpawnEdge,
   file: FileEdge,
   mcpuse: AttachEdge,
-  summary: SummaryEdge,
 }

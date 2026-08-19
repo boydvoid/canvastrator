@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
@@ -19,10 +19,8 @@ import { FileNode } from '@/components/nodes/FileNode'
 import { FolderNode } from '@/components/nodes/FolderNode'
 import { McpNode } from '@/components/nodes/McpNode'
 import { McpToolNode } from '@/components/nodes/McpToolNode'
-import { PersonalityNode } from '@/components/nodes/PersonalityNode'
 import { SessionNode } from '@/components/nodes/SessionNode'
 import { SkillNode } from '@/components/nodes/SkillNode'
-import { SummaryNode } from '@/components/nodes/SummaryNode'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -58,10 +56,8 @@ const nodeTypes: NodeTypes = {
   skill: SkillNode,
   folder: FolderNode,
   file: FileNode,
-  personality: PersonalityNode,
   mcp: McpNode,
   mcptool: McpToolNode,
-  summary: SummaryNode,
 }
 
 function Surface() {
@@ -82,7 +78,7 @@ function Surface() {
       .then(setMcpAvailable)
       .catch(() => setMcpAvailable([]))
   }, [cwd])
-  const { onNodesChange, onEdgesChange, onConnect, addSession, addSkill, addFolder, addFile, addPersonality } =
+  const { onNodesChange, onEdgesChange, onConnect, addSession, addSkill, addFolder, addFile } =
     useStore.getState()
 
   const wrapper = useRef<HTMLDivElement>(null)
@@ -117,6 +113,68 @@ function Surface() {
   )
 
   const spawn = useCallback((provider: Provider) => spawnAt(provider, menuAt), [spawnAt, menuAt])
+
+  // Spawning wires a child to its parent three times over — the lineage edge
+  // and a context edge each way — and drawing all three means every parent is
+  // tied to every child by a bundle of identical lines. The lineage edge says
+  // everything the other two would; the context edges still exist, they just
+  // aren't drawn on top of it. A context edge the user drew themselves has no
+  // spawn edge under it, so it always shows.
+  const visibleEdges = useMemo(() => {
+    const pair = (a: string, b: string) => [a, b].sort().join('\u0000')
+    const lineage = new Set(
+      edges.filter((e) => e.type === 'spawn').map((e) => pair(e.source, e.target)),
+    )
+    return edges.filter((e) => e.type !== 'context' || !lineage.has(pair(e.source, e.target)))
+  }, [edges])
+
+  /**
+   * What the selected node is wired to.
+   *
+   * On a canvas of thirty nodes the question a click is really asking is "what
+   * does this one touch?", and answering it by tracing lines by eye is the
+   * work the canvas is supposed to be doing. Selecting a node lights its own
+   * connectors and whatever sits on the other end of them, and pushes
+   * everything else back.
+   */
+  const focus = useMemo(() => {
+    // A rubber-band selection is several nodes, and the answer for a group is
+    // the union of what each of them touches.
+    const picked = new Set(nodes.filter((n) => n.selected).map((n) => n.id))
+    if (!picked.size) return null
+    const wires = visibleEdges.filter((e) => picked.has(e.source) || picked.has(e.target))
+    return {
+      picked,
+      nodes: new Set([...picked, ...wires.flatMap((e) => [e.source, e.target])]),
+      edges: new Set(wires.map((e) => e.id)),
+    }
+  }, [nodes, visibleEdges])
+
+  const shownNodes = useMemo(
+    () =>
+      focus
+        ? nodes.map((n) => ({
+            ...n,
+            className: focus.picked.has(n.id)
+              ? undefined
+              : focus.nodes.has(n.id)
+                ? 'gt-linked'
+                : 'gt-faded',
+          }))
+        : nodes,
+    [nodes, focus],
+  )
+
+  const shownEdges = useMemo(
+    () =>
+      focus
+        ? visibleEdges.map((e) => ({
+            ...e,
+            className: focus.edges.has(e.id) ? 'gt-wire-lit' : 'gt-wire-faded',
+          }))
+        : visibleEdges,
+    [visibleEdges, focus],
+  )
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -156,9 +214,6 @@ function Surface() {
         }
         case 'skill':
           st.addSkill(at())
-          break
-        case 'personality':
-          st.addPersonality(at())
           break
         case 'tidy':
           st.tidy(true)
@@ -209,8 +264,8 @@ function Surface() {
             }}
             >
               <ReactFlow
-                nodes={nodes}
-                edges={edges}
+                nodes={shownNodes}
+                edges={shownEdges}
                 nodeTypes={nodeTypes}
                 edgeTypes={edgeTypes}
                 onNodesChange={onNodesChange}
@@ -222,12 +277,14 @@ function Surface() {
                   useStore.getState().claimNode(node.id)
                 }}
                 onNodeClick={(_, node) => {
-                  // Clicking a session points the dock at it. Selecting a node
-                  // and then hunting for the same conversation in a dropdown
-                  // is work the app can do for you.
+                  // A node is a label; everything about the agent is in the
+                  // dock. So clicking one opens the dock on that conversation
+                  // rather than leaving the click with nothing to show for it.
                   if (node.type !== 'session') return
                   const st = useStore.getState()
                   st.setChatTarget(node.id)
+                  // setRightTab opens the dock, so a click always lands
+                  // somewhere visible even with the panel put away.
                   st.setRightTab('chat')
                 }}
                 proOptions={{ hideAttribution: true }}
@@ -313,15 +370,6 @@ function Surface() {
             >
               Skill
               <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.skill}</span>
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => addPersonality(screenToFlowPosition(menuAt))}
-              className="justify-between"
-            >
-              Personality
-              <span className="font-mono text-[10px] text-fg-faint">
-                {SHORTCUT_LABEL.personality}
-              </span>
             </ContextMenuItem>
             <ContextMenuSub>
               <ContextMenuSubTrigger>MCP</ContextMenuSubTrigger>

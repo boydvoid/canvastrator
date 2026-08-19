@@ -107,26 +107,14 @@ function Editor({
 function Row({ persona, index }: { persona: Persona; index: number }) {
   const library = useStore((s) => s.library)
   const setLibrary = useStore((s) => s.setLibrary)
-  const addPersonality = useStore((s) => s.addPersonality)
+  const addSessionFromPersona = useStore((s) => s.addSessionFromPersona)
   const [editing, setEditing] = useState(false)
 
   const update = (p: Persona) => void setLibrary(library.map((x) => (x.id === p.id ? p : x)))
   const remove = () => void setLibrary(library.filter((x) => x.id !== persona.id))
 
-  const place = () =>
-    addPersonality(
-      // Staggered so several placed in a row don't stack.
-      { x: 80 + index * 24, y: 120 + index * 24 },
-      {
-        name: persona.name,
-        description: persona.description,
-        provider: persona.provider,
-        permission: persona.permission,
-        instructions: persona.instructions,
-        ...(persona.model ? { model: persona.model } : {}),
-        ...(persona.effort ? { effort: persona.effort } : {}),
-      },
-    )
+  // Staggered so several started in a row don't stack.
+  const place = () => addSessionFromPersona(persona, { x: 80 + index * 24, y: 120 + index * 24 })
 
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-panel">
@@ -161,7 +149,7 @@ function Row({ persona, index }: { persona: Persona; index: number }) {
             variant="ghost"
             size="icon"
             onClick={place}
-            title="Add to canvas"
+            title="Start an agent with this persona"
             className="h-5 w-5"
           >
             <Plus size={11} />

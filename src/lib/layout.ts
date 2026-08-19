@@ -4,70 +4,80 @@ import type { GtNode } from './store'
 
 /**
  * Laying out a Canvastrator canvas is not a generic graph problem — the graph
- * has a grammar, and it is the grammar of a flow chart read top to bottom:
+ * has a grammar, and it is the grammar of a flow chart read left to right:
  *
- *                        ┌───────────────┐
- *          folder ───────┤  orchestrator │
- *                        └───────┬───────┘
- *              ┌─────────────────┼─────────────────┐
- *          ┌───┴───┐         ┌───┴───┐         ┌───┴───┐
- *          │ agent │         │ agent │         │ agent │
- *          └───┬───┘         └───┬───┘         └───┬───┘
- *            file                file              file
- *            file                file
+ *                          skill ┐              ┌ file  file
+ *                                 ├─┤ agent ├────┤
+ *   ┌────────┐     ┌──────────┐   │              └ file  file
+ *   │ folder ├─────┤ orchestr ├───┤
+ *   └────────┘     └──────────┘   │              ┌ file
+ *                           mcp ┐ ├─┤ agent ├────┤
+ *                                                └ file
  *
- * The orchestrator sits at the top. Agents it spawned spread out in a row
- * beneath it, each centred in the space its own subtree occupies. Files an
- * agent touched hang directly below that agent, so a column reads as one
- * agent's work. Supporting nodes — the folder, skills, personas, MCP servers —
- * sit beside whatever they are attached to rather than getting a lane of their
- * own, and a server's tool nodes tuck under the server.
+ * Everything moves one way: in on the left, out on the right. The orchestrator
+ * sits at the front, agents it spawned stack in a column to its right, and each
+ * agent's own strip repeats the rule — what was wired in to set it up (folder,
+ * skills, MCP servers, attached files) enters from its left, and the files it
+ * touched hang off its right.
+ *
+ * A support wired into *several* agents — the repo folder, usually — belongs to
+ * none of their strips: it goes in a column of its own in front of everything
+ * it feeds, which is where a flow chart puts its input.
+ *
+ * Files go in a *grid*, not a column. A busy agent touches ten files, and ten
+ * file nodes in a line is 900px of strip that pushes the next agent that far
+ * down — the canvas becomes one endless vertical scroll, which is the thing
+ * the horizontal flow exists to avoid.
  *
  * Dagre does the hard half — ranking the agent tree, ordering each rank to
- * minimise crossings, and centring a parent over its children. Hand-rolling
- * that is how the old layout got into trouble: every new case (a support
- * overhanging to the left, a deep file column pushing into the next agent's
- * subtree) needed another correction to the width arithmetic, and they
- * disagreed with each other.
+ * minimise crossings, and centring a parent against its children. Hand-rolling
+ * that is how the old layout got into trouble: every new case needed another
+ * correction to the size arithmetic, and they disagreed with each other.
  *
- * So only the *tree* goes to dagre. Each agent's block — its supports, itself,
+ * So only the *tree* goes to dagre. Each agent's strip — its supports, itself,
  * and its column of files — is measured and handed over as a single node, and
  * the contents are placed inside that node's box afterwards. Dagre never sees a
- * file, which is what keeps files in a column under their agent instead of
+ * file, which is what keeps files in a strip under their agent instead of
  * fanned across a rank as siblings.
  *
- * One wrinkle worth knowing: supports hang off the left only, so a block is not
- * symmetric about its session. Dagre centres a parent over the *box* it was
- * given, so the box reserves the support width on both sides. That wastes some
- * empty space to the right of a session and buys exact centring in return —
- * the alternative is correcting dagre's output afterwards, which is the trap
- * the previous implementation fell into.
+ * One wrinkle worth knowing: the strip is not symmetric about its session —
+ * supports above and files below are rarely the same height. Dagre centres a
+ * node against its rank by the *box* it was given, so the box reserves the
+ * taller of the two on both sides. That wastes some empty space and buys exact
+ * centring in return — the alternative is correcting dagre's output afterwards,
+ * which is the trap the previous implementation fell into.
  */
 
 export type Box = { x: number; y: number; w: number; h: number }
 export type Placement = Record<string, { x: number; y: number }>
 
-/** Between a session and the supports stacked to its left. */
-const SUPPORT_GAP_X = 90
-/** Between two stacked supports. */
-const SUPPORT_GAP_Y = 40
-/** Between a session and the column of files below it, and between files. */
-const OUTPUT_GAP_Y = 28
-/** A parent's block to the row of children under it — deep enough to read as a level. */
-const LEVEL_GAP_Y = 110
-/** Between sibling subtrees in a row. */
-const SIBLING_GAP_X = 80
-/** A tool node's inset under the MCP server it belongs to. */
-const SATELLITE_INDENT = 28
+/** A session to the supports on its left, and to the files on its right. */
+const BRANCH_GAP_X = 56
+/** Between two stacked supports, and between two rows of files. */
+const STACK_GAP_Y = 18
+/** Between two files side by side in the grid beside an agent. */
+const STACK_GAP_X = 18
+/** Widest a file grid may get. Past this it pushes the next rank too far
+ *  right to read as the same flow. */
+const MAX_FILE_COLUMNS = 3
+/** A parent's strip to the column of children beside it — a readable level. */
+const LEVEL_GAP_X = 150
+/** Between sibling subtrees in a column. */
+const SIBLING_GAP_Y = 52
+/** Between an MCP server and the column of tool nodes it feeds. */
+const SATELLITE_GAP_X = 28
+
+/** An agent node is a label, not a window: one fixed size, everywhere. */
+export const SESSION_SIZE = { w: 260, h: 64 }
+/** A file is a chip. There are a lot of them, and they stack. */
+export const FILE_SIZE = { w: 196, h: 38 }
 
 /** Fallback sizes for nodes React Flow hasn't measured yet. */
 const DEFAULT_SIZE: Record<GtNode['type'], { w: number; h: number }> = {
-  session: { w: 400, h: 340 },
-  file: { w: 224, h: 64 },
+  session: SESSION_SIZE,
+  file: FILE_SIZE,
   folder: { w: 256, h: 76 },
   skill: { w: 240, h: 190 },
-  personality: { w: 256, h: 280 },
-  summary: { w: 260, h: 96 },
   mcp: { w: 240, h: 150 },
   mcptool: { w: 208, h: 52 },
 }
@@ -101,10 +111,12 @@ export function findFreeSpot(desired: Box, taken: Box[], step = 24): { x: number
 type Support = { node: GtNode; kids: GtNode[] }
 
 type Groups = {
-  /** session id → files it touched and summaries it produced, in reading order */
+  /** session id → files it touched, in reading order */
   outputs: Map<string, GtNode[]>
-  /** session id → folder / skills / personas / servers wired into it */
+  /** session id → folder / skills / servers / files wired into it alone */
   supports: Map<string, Support[]>
+  /** supports feeding more than one session, with everything they feed */
+  shared: Array<Support & { targets: string[] }>
   /** session id → child session ids, by spawn edge */
   children: Map<string, string[]>
   orphans: GtNode[]
@@ -115,7 +127,6 @@ function group(nodes: GtNode[], edges: Edge[]): Groups {
   const sessions = nodes.filter((n) => n.type === 'session')
 
   const outFiles = new Map<string, GtNode[]>()
-  const outSummaries = new Map<string, GtNode[]>()
   const supportOf = new Map<string, GtNode[]>()
   const children = new Map<string, string[]>()
   /** non-session node → the support node it hangs from (server → its tools) */
@@ -134,12 +145,7 @@ function group(nodes: GtNode[], edges: Edge[]): Groups {
       push(outFiles, source.id, target)
       claimed.add(target.id)
     }
-    // session → summary: an account of one of its turns.
-    if (e.type === 'summary' && source.type === 'session' && target.type === 'summary') {
-      push(outSummaries, source.id, target)
-      claimed.add(target.id)
-    }
-    // anything → session: a support, sitting beside it.
+    // anything → session: a support, sitting above it.
     if (
       target.type === 'session' &&
       (e.type === 'cwd' || e.type === 'attach' || (e.type === 'file' && source.type === 'file'))
@@ -158,43 +164,68 @@ function group(nodes: GtNode[], edges: Edge[]): Groups {
     }
   }
 
-  // Summaries read oldest-first, and follow the files in the same column.
   const outputs = new Map<string, GtNode[]>()
   for (const s of sessions) {
-    const merged = [
-      ...(outFiles.get(s.id) ?? []),
-      ...[...(outSummaries.get(s.id) ?? [])].sort(
-        (a, b) => (a.type === 'summary' ? a.data.ts : 0) - (b.type === 'summary' ? b.data.ts : 0),
-      ),
-    ]
-    if (merged.length) outputs.set(s.id, merged)
+    const mine = outFiles.get(s.id) ?? []
+    if (mine.length) outputs.set(s.id, mine)
+  }
+
+  // A support wired into several sessions can't live in any one strip — put it
+  // in front of all of them instead.
+  const fedBy = new Map<string, string[]>()
+  for (const [sessionId, list] of supportOf) {
+    for (const node of list) push(fedBy, node.id, sessionId)
   }
 
   const supports = new Map<string, Support[]>()
   for (const [id, list] of supportOf) {
-    supports.set(
-      id,
-      list.map((node) => ({ node, kids: kidsOf.get(node.id) ?? [] })),
-    )
+    const mine = list
+      .filter((node) => (fedBy.get(node.id) ?? []).length < 2)
+      .map((node) => ({ node, kids: kidsOf.get(node.id) ?? [] }))
+    if (mine.length) supports.set(id, mine)
+  }
+
+  const seen = new Set<string>()
+  const shared: Groups['shared'] = []
+  for (const list of supportOf.values()) {
+    for (const node of list) {
+      const targets = fedBy.get(node.id) ?? []
+      if (targets.length < 2 || seen.has(node.id)) continue
+      seen.add(node.id)
+      shared.push({ node, kids: kidsOf.get(node.id) ?? [], targets })
+    }
   }
 
   return {
     outputs,
     supports,
+    shared,
     children,
     // Nodes attached to nothing still need somewhere to go.
     orphans: nodes.filter((n) => n.type !== 'session' && !claimed.has(n.id)),
   }
 }
 
-/** How much room a support and its tool nodes need. */
+/** How much room a support and the tool nodes it feeds need, together. */
 function supportSize(s: Support) {
   const own = sizeOf(s.node)
-  const w = Math.max(own.w, ...s.kids.map((k) => SATELLITE_INDENT + sizeOf(k).w))
-  const h =
-    own.h + s.kids.reduce((sum, k) => sum + OUTPUT_GAP_Y + sizeOf(k).h, 0)
-  return { w, h }
+  if (!s.kids.length) return { w: own.w, h: own.h }
+  const kidsW = Math.max(...s.kids.map((k) => sizeOf(k).w))
+  const kidsH = stackHeight(
+    s.kids.map((k) => sizeOf(k).h),
+    STACK_GAP_Y,
+  )
+  // The tools sit in the lane between the server and the agent, so the cluster
+  // is as wide as both and as tall as the taller of them.
+  return { w: own.w + SATELLITE_GAP_X + kidsW, h: Math.max(own.h, kidsH) }
 }
+
+/**
+ * Shape of the file grid beside an agent: near-square, capped in width. Four
+ * deep before it takes a second column, so the common case — an agent that
+ * touched one or two files — is still a plain little column beside the node.
+ */
+const gridCols = (n: number) => Math.max(1, Math.min(MAX_FILE_COLUMNS, Math.ceil(n / 4)))
 
 /** Total height of a vertical stack, including the gaps between its members. */
 const stackHeight = (heights: number[], gap: number) =>
@@ -216,43 +247,48 @@ export function layoutCanvas(
   movable?: ReadonlySet<string>,
 ): Placement {
   const byId = new Map(nodes.map((n) => [n.id, n]))
-  const { outputs, supports, children, orphans } = group(nodes, edges)
+  const { outputs, supports, shared, children, orphans } = group(nodes, edges)
   const out: Placement = {}
   const owns = (id: string) => !movable || movable.has(id)
 
-  /** Everything a session's block needs, measured before dagre sees it. */
+  /** Everything a session's strip needs, measured before dagre sees it. */
   const blockOf = (id: string) => {
     const session = byId.get(id)
-    const own = session ? sizeOf(session) : { w: 400, h: 340 }
+    const own = session ? sizeOf(session) : DEFAULT_SIZE.session
 
     const mySupports = supports.get(id) ?? []
     const supportBoxes = mySupports.map(supportSize)
     const supportsW = Math.max(0, ...supportBoxes.map((b) => b.w))
     const supportsH = stackHeight(
       supportBoxes.map((b) => b.h),
-      SUPPORT_GAP_Y,
+      STACK_GAP_Y,
     )
 
     const myOutputs = outputs.get(id) ?? []
-    const outputsW = Math.max(0, ...myOutputs.map((n) => sizeOf(n).w))
-    const outputsH = stackHeight(
-      myOutputs.map((n) => sizeOf(n).h),
-      OUTPUT_GAP_Y,
-    )
+    const cell = {
+      w: Math.max(0, ...myOutputs.map((n) => sizeOf(n).w)),
+      h: Math.max(0, ...myOutputs.map((n) => sizeOf(n).h)),
+    }
+    const cols = gridCols(myOutputs.length)
+    const rows = Math.ceil(myOutputs.length / cols)
+    const outputsW = myOutputs.length ? cols * cell.w + (cols - 1) * STACK_GAP_X : 0
+    const outputsH = myOutputs.length ? rows * cell.h + (rows - 1) * STACK_GAP_Y : 0
 
-    const coreW = Math.max(own.w, outputsW)
-    const stackH = own.h + (myOutputs.length ? OUTPUT_GAP_Y + outputsH : 0)
-    // Reserved on both sides so the session stays the centre of its own box.
-    const reserve = supportsW ? supportsW + SUPPORT_GAP_X : 0
-
+    // Supports enter from the left, files leave to the right, and the session
+    // holds the middle — so the strip reads the same direction as the flow it
+    // sits in rather than doubling back through the top and bottom of a node.
     return {
       own,
-      coreW,
-      stackH,
-      supportsW,
       supportsH,
-      width: coreW + 2 * reserve,
-      height: Math.max(stackH, supportsH),
+      outputsH,
+      cell,
+      cols,
+      leftPad: supportsW ? supportsW + BRANCH_GAP_X : 0,
+      rightPad: outputsW ? outputsW + BRANCH_GAP_X : 0,
+      // Only ever as tall as the strip really is: supports and files are both
+      // centred on the session, so the strip is symmetric about it and dagre
+      // can keep siblings clear of each other by height alone.
+      height: Math.max(own.h, supportsH, outputsH),
     }
   }
 
@@ -261,10 +297,11 @@ export function layoutCanvas(
   // ── the tree, by dagre ────────────────────────────────────────────────
   const g = new dagre.graphlib.Graph({ directed: true })
   g.setGraph({
-    rankdir: 'TB',
-    nodesep: SIBLING_GAP_X,
-    ranksep: LEVEL_GAP_Y,
-    // Independent flows on one canvas are separate components; keep them apart.
+    // Left to right: the flow reads as a pipeline, and a deep spawn tree grows
+    // into the direction a wide window actually has room in.
+    rankdir: 'LR',
+    nodesep: SIBLING_GAP_Y,
+    ranksep: LEVEL_GAP_X,
     marginx: 0,
     marginy: 0,
   })
@@ -274,13 +311,17 @@ export function layoutCanvas(
   for (const s of sessions) {
     const block = blockOf(s.id)
     blocks.set(s.id, block)
-    g.setNode(s.id, { width: block.width, height: block.height })
+    // Dagre sees the agent, not its strip. Handing it the whole strip width
+    // means every agent in a generation starts at a different x — the one with
+    // a wide file grid sits further left — and the column reads as a ragged
+    // edge. The strip's own width is packed into the ranks below instead.
+    g.setNode(s.id, { width: block.own.w, height: block.height })
   }
   // Reversed on purpose. With no crossings to minimise, dagre's ordering
   // heuristic is free to pick any permutation of a sibling group, and it
   // consistently settles on the reverse of insertion order — so the first agent
-  // an orchestrator spawned would end up rightmost. Feeding the edges backwards
-  // puts spawn order back left to right. `orders siblings by spawn order`
+  // an orchestrator spawned would end up last. Feeding the edges backwards
+  // puts spawn order back top to bottom. `orders siblings by spawn order`
   // in the tests pins this down, so a dagre upgrade that changes the heuristic
   // fails loudly instead of quietly mirroring everyone's canvas.
   const spawnEdges: Array<[string, string]> = []
@@ -293,46 +334,125 @@ export function layoutCanvas(
   // Dagre breaks cycles itself, so a spawn loop can't hang the layout.
   dagre.layout(g)
 
-  // ── the contents of each block ────────────────────────────────────────
+  // ── ranks packed by hand ──────────────────────────────────────────────
+  // Every agent in a rank gets the same x, and a rank starts where the widest
+  // strip in the rank before it ended. Dagre decided the ordering and the
+  // vertical placement, which is the part that is genuinely hard; spacing
+  // columns is arithmetic, and doing it here is what keeps the generations
+  // aligned without paying for the widest strip on both sides of every agent.
+  const laidX = new Map<string, number>()
+  const ranks = new Map<number, string[]>()
+  for (const s of sessions) {
+    const laid = g.node(s.id) as { x: number } | undefined
+    if (!laid) continue
+    // Equal widths mean dagre puts a whole rank on one centre line, so the
+    // centre *is* the rank key.
+    ranks.set(laid.x, [...(ranks.get(laid.x) ?? []), s.id])
+  }
+  let cursor = 0
+  for (const key of [...ranks.keys()].sort((a, b) => a - b)) {
+    const ids = ranks.get(key)!
+    const mine = ids.map((id) => blocks.get(id)!)
+    cursor += Math.max(...mine.map((b) => b.leftPad))
+    for (const id of ids) laidX.set(id, cursor)
+    cursor +=
+      Math.max(...mine.map((b) => b.own.w)) +
+      Math.max(...mine.map((b) => b.rightPad)) +
+      LEVEL_GAP_X
+  }
+
+  // ── the contents of each strip ────────────────────────────────────────
   for (const s of sessions) {
     const block = blocks.get(s.id)!
     const laid = g.node(s.id) as { x: number; y: number } | undefined
     if (!laid) continue
 
-    // A session the user placed anchors its own block: its supports and files
+    // A session the user placed anchors its own strip: its supports and files
     // arrange around where it actually is, not where dagre would put it.
+    // A session the user placed anchors its own strip: dagre's idea of where
+    // the strip belongs is only used for the ones the layout owns.
     const fixed = !owns(s.id)
-    const cx = fixed ? s.position.x + block.own.w / 2 : laid.x
-    const blockTop = fixed
-      ? s.position.y - Math.round((block.height - block.stackH) / 2)
-      : laid.y - block.height / 2
-
-    const sx = Math.round(cx - block.own.w / 2)
-    const sy = Math.round(blockTop + (block.height - block.stackH) / 2)
+    const sx = fixed ? s.position.x : Math.round(laidX.get(s.id) ?? laid.x - block.own.w / 2)
+    const sy = fixed ? s.position.y : Math.round(laid.y - block.own.h / 2)
+    // Everything in the strip lines up on the session's own centre line, so a
+    // support, its session and the files it produced all read as one row.
+    const cy = sy + block.own.h / 2
     if (!fixed) out[s.id] = { x: sx, y: sy }
 
-    // Supports to the left, each with its own tool nodes tucked beneath it.
-    const supportsRight = Math.round(cx - block.coreW / 2 - SUPPORT_GAP_X)
-    let py = Math.round(blockTop + (block.height - block.supportsH) / 2)
+    // Supports in a column to the left, each with its tool nodes beneath it.
+    let py = Math.round(cy - block.supportsH / 2)
     for (const sup of supports.get(s.id) ?? []) {
       const box = supportSize(sup)
       const nodeSize = sizeOf(sup.node)
-      const left = supportsRight - nodeSize.w
-      if (owns(sup.node.id)) out[sup.node.id] = { x: left, y: py }
-      let ky = py + nodeSize.h + OUTPUT_GAP_Y
-      for (const kid of sup.kids) {
-        if (owns(kid.id)) out[kid.id] = { x: left + SATELLITE_INDENT, y: ky }
-        ky += sizeOf(kid).h + OUTPUT_GAP_Y
+      // The cluster is right-aligned against the session, so every support
+      // ends on the same line however wide it is.
+      const left = sx - BRANCH_GAP_X - box.w
+      const centre = py + box.h / 2
+      if (owns(sup.node.id)) {
+        out[sup.node.id] = { x: left, y: Math.round(centre - nodeSize.h / 2) }
       }
-      py += box.h + SUPPORT_GAP_Y
+      // A server's tools go in the lane between it and the agent — still left
+      // to right, rather than doubling back under the node.
+      const kidsH = stackHeight(
+        sup.kids.map((k) => sizeOf(k).h),
+        STACK_GAP_Y,
+      )
+      let ky = Math.round(centre - kidsH / 2)
+      for (const kid of sup.kids) {
+        if (owns(kid.id)) out[kid.id] = { x: left + nodeSize.w + SATELLITE_GAP_X, y: ky }
+        ky += sizeOf(kid).h + STACK_GAP_Y
+      }
+      py += box.h + STACK_GAP_Y
     }
 
-    // Outputs in a column directly below the session, centred on it.
-    let oy = sy + block.own.h + OUTPUT_GAP_Y
-    for (const n of outputs.get(s.id) ?? []) {
-      const size = sizeOf(n)
-      if (owns(n.id)) out[n.id] = { x: Math.round(cx - size.w / 2), y: oy }
-      oy += size.h + OUTPUT_GAP_Y
+    // Outputs in a grid off the session's right, read left to right, so the
+    // newest file is the last cell of the last row.
+    const myOutputs = outputs.get(s.id) ?? []
+    const gridLeft = sx + block.own.w + BRANCH_GAP_X
+    const gridTop = Math.round(cy - block.outputsH / 2)
+    myOutputs.forEach((n, i) => {
+      if (!owns(n.id)) return
+      const col = i % block.cols
+      const row = Math.floor(i / block.cols)
+      out[n.id] = {
+        x: gridLeft + col * (block.cell.w + STACK_GAP_X),
+        // Each file centred in its own cell, so a short row of chips still
+        // lines up with the rows above it.
+        y: Math.round(gridTop + row * (block.cell.h + STACK_GAP_Y) + (block.cell.h - sizeOf(n).h) / 2),
+      }
+    })
+  }
+
+  // ── shared supports, in a column in front of the flow ─────────────────
+  const placedBox = (id: string): Box | null => {
+    const node = byId.get(id)
+    if (!node) return null
+    return { ...(out[id] ?? node.position), ...sizeOf(node) }
+  }
+
+  const takenByShared: Box[] = []
+  for (const sup of shared) {
+    const fed = sup.targets.map(placedBox).filter((b): b is Box => !!b)
+    if (!fed.length) continue
+    const box = supportSize(sup)
+    const nodeSize = sizeOf(sup.node)
+    const left = Math.min(...fed.map((b) => b.x)) - LEVEL_GAP_X - nodeSize.w
+    // Level with the middle of everything it feeds, so its edges fan evenly.
+    const centre = fed.reduce((sum, b) => sum + b.y + b.h / 2, 0) / fed.length
+    const spot = findFreeSpot(
+      { x: left, y: Math.round(centre - box.h / 2), w: box.w, h: box.h },
+      takenByShared,
+    )
+    takenByShared.push({ ...spot, w: box.w, h: box.h })
+    if (owns(sup.node.id)) out[sup.node.id] = spot
+    const kidsH = stackHeight(
+      sup.kids.map((k) => sizeOf(k).h),
+      STACK_GAP_Y,
+    )
+    let ky = Math.round(spot.y + box.h / 2 - kidsH / 2)
+    for (const kid of sup.kids) {
+      if (owns(kid.id)) out[kid.id] = { x: spot.x + nodeSize.w + SATELLITE_GAP_X, y: ky }
+      ky += sizeOf(kid).h + STACK_GAP_Y
     }
   }
 
@@ -346,8 +466,8 @@ export function layoutCanvas(
   let ox = 0
   for (const n of orphans) {
     const s = sizeOf(n)
-    if (owns(n.id)) out[n.id] = { x: ox, y: deepest + LEVEL_GAP_Y }
-    ox += s.w + SUPPORT_GAP_Y
+    if (owns(n.id)) out[n.id] = { x: ox, y: deepest + BRANCH_GAP_X }
+    ox += s.w + STACK_GAP_Y
   }
 
   // Fixed nodes never moved, so a placed node can still land on one. Nudge the

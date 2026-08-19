@@ -11,13 +11,12 @@ import {
 } from '@xyflow/react'
 import { dirExists, fileExists, interruptSession, readFileHead, sendTurn } from './bridge'
 import { looksLikeQuestion } from './asking'
-import { boxOf, findFreeSpot, layoutCanvas, sizeOf } from './layout'
+import { boxOf, FILE_SIZE, findFreeSpot, layoutCanvas, SESSION_SIZE, sizeOf } from './layout'
 import { parsePersonaDefinitions } from './persona-parse'
 import { summarizeTurn } from './summary'
 import {
   dedupeByName,
   loadLibrary,
-  nodeDataFromPersona,
   saveLibrary,
   STARTER_PERSONAS,
   type Persona,
@@ -36,14 +35,13 @@ import type {
   McpToolNodeData,
   Message,
   ModelOption,
-  PersonalityNodeData,
   Permission,
   Provider,
   ProviderStatus,
   SessionNodeData,
   SkillNodeData,
   SkillTrigger,
-  SummaryNodeData,
+  Notification,
 } from './types'
 
 export type CanvasDialog = 'open' | 'save-as' | 'rules'
@@ -53,10 +51,8 @@ export type GtNode =
   | (Node<SkillNodeData> & { type: 'skill' })
   | (Node<FolderNodeData> & { type: 'folder' })
   | (Node<FileNodeData> & { type: 'file' })
-  | (Node<PersonalityNodeData> & { type: 'personality' })
   | (Node<McpNodeData> & { type: 'mcp' })
   | (Node<McpToolNodeData> & { type: 'mcptool' })
-  | (Node<SummaryNodeData> & { type: 'summary' })
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 
@@ -71,7 +67,8 @@ const MAX_AUTO_FILES_PER_SESSION = 10
  * the canvas, so the oldest are dropped rather than the newest withheld — the
  * turn that just finished is the one worth looking at.
  */
-const MAX_SUMMARIES_PER_SESSION = 6
+/** Kept in the feed before the oldest fall off. */
+const MAX_NOTIFICATIONS = 200
 
 type State = {
   nodes: GtNode[]
@@ -118,15 +115,12 @@ type State = {
   openFile: (path: string | null) => void
 
   addSession: (provider: Provider, pos: { x: number; y: number }) => string
+  /** Start an agent configured by a library persona. */
+  addSessionFromPersona: (persona: Persona, pos: { x: number; y: number }) => string
   addSkill: (pos: { x: number; y: number }, seed?: Partial<SkillNodeData>) => string
   addFolder: (path: string, pos: { x: number; y: number }) => string
   addFile: (path: string, pos: { x: number; y: number }, origin?: 'user' | 'agent') => string
-  addPersonality: (pos: { x: number; y: number }, seed?: Partial<PersonalityNodeData>) => string
   addMcp: (server: McpServer, pos: { x: number; y: number }) => string
-  addSummary: (
-    pos: { x: number; y: number },
-    data: Omit<SummaryNodeData, 'summaryId' | 'ts'>,
-  ) => string
   initLibrary: () => Promise<void>
   setLibrary: (l: Persona[]) => Promise<void>
   toggleLibrary: () => void
@@ -138,6 +132,10 @@ type State = {
    * added or moved stays exactly where they put it.
    */
   autoPlaced: Set<string>
+  /** What happened while you weren't looking, newest first. */
+  notifications: Notification[]
+  markNotificationsRead: () => void
+  clearNotifications: () => void
   /** Messages typed at a session that was mid-turn, waiting their turn. */
   queued: Record<string, string[]>
   /**
@@ -149,7 +147,6 @@ type State = {
   /** Hand a node back to the user — called when they drag it. */
   claimNode: (id: string) => void
   toggleAutoTidy: () => void
-  updatePersonality: (nodeId: string, patch: Partial<PersonalityNodeData>) => void
   updateSkill: (nodeId: string, patch: Partial<SkillNodeData>) => void
   removeNode: (id: string) => void
   renameSession: (nodeId: string, name: string) => void
@@ -157,6 +154,8 @@ type State = {
   setModel: (nodeId: string, model?: string) => void
   /** Undefined is "unset" — fall back to the provider's own default. */
   setEffort: (nodeId: string, effort?: Effort) => void
+  /** This agent's standing brief, prepended to every turn. */
+  setInstructions: (nodeId: string, instructions: string) => void
   setRightTab: (t: 'chat' | 'personas') => void
   setChatTarget: (nodeId: string | null) => void
 
@@ -187,8 +186,6 @@ function dropAbandonedTurn(messages: Message[]): Message[] {
 const isSkill = (n: GtNode): n is GtNode & { type: 'skill' } => n.type === 'skill'
 const isFolder = (n: GtNode): n is GtNode & { type: 'folder' } => n.type === 'folder'
 const isFile = (n: GtNode): n is GtNode & { type: 'file' } => n.type === 'file'
-const isPersonality = (n: GtNode): n is GtNode & { type: 'personality' } =>
-  n.type === 'personality'
 const isMcp = (n: GtNode): n is GtNode & { type: 'mcp' } => n.type === 'mcp'
 const isMcpTool = (n: GtNode): n is GtNode & { type: 'mcptool' } => n.type === 'mcptool'
 
@@ -244,44 +241,18 @@ export function mcpFor(nodes: GtNode[], edges: Edge[], sessionNodeId: string): M
       ...(n.data.url ? { url: n.data.url } : {}),
     }))
 }
-const isSummary = (n: GtNode): n is GtNode & { type: 'summary' } => n.type === 'summary'
 
 /**
- * What a session may spawn: personality nodes wired into it, plus every persona
- * in the library.
+ * What a session may spawn: every persona in the library.
  *
- * The library is deliberately available without wiring — a persona you defined
- * once should be usable on any canvas, and making people re-wire "reviewer"
- * every time defeats the point of a library. A wired node still wins on a name
- * clash, so a canvas can override a library persona locally.
+ * Personas used to also come from personality nodes wired into the session,
+ * which meant a canvas needed one node per role before an orchestrator could
+ * use it. The library is available everywhere without wiring — a persona you
+ * defined once should work on any canvas — so the nodes only ever added
+ * clutter and a second place for the same settings to drift.
  */
-export function rosterFor(
-  nodes: GtNode[],
-  edges: Edge[],
-  library: Persona[],
-  sessionNodeId: string,
-): Array<Persona & { nodeId?: string }> {
-  const wired = spawnableBy(nodes, edges, sessionNodeId).map((n) => ({
-    id: n.data.personalityId,
-    name: n.data.name,
-    description: n.data.description,
-    provider: n.data.provider,
-    permission: n.data.permission,
-    instructions: n.data.instructions,
-    ...(n.data.model ? { model: n.data.model } : {}),
-    ...(n.data.effort ? { effort: n.data.effort } : {}),
-    nodeId: n.id,
-  }))
-  const taken = new Set(wired.map((p) => p.name.toLowerCase()))
-  return [...wired, ...library.filter((p) => !taken.has(p.name.toLowerCase()))]
-}
-
-/** Personalities a session is allowed to spawn: the ones wired into it. */
-function spawnableBy(nodes: GtNode[], edges: Edge[], sessionNodeId: string) {
-  return edges
-    .filter((e) => e.target === sessionNodeId && e.type === 'attach')
-    .map((e) => nodes.find((n) => n.id === e.source))
-    .filter((n): n is GtNode & { type: 'personality' } => !!n && isPersonality(n))
+export function rosterFor(library: Persona[]): Persona[] {
+  return library
 }
 
 export const basename = (p: string) => p.replace(/\/+$/, '').split('/').pop() || p
@@ -379,6 +350,7 @@ export const useStore = create<State>((set, get) => ({
   chatTarget: null,
   autoTidy: true,
   autoPlaced: new Set<string>(),
+  notifications: [],
   queued: {},
   restarting: {},
 
@@ -413,10 +385,6 @@ export const useStore = create<State>((set, get) => ({
       }
       // An MCP server wired into a session grants it that server's tools.
       if (isMcp(source) && isSession(target)) {
-        return { edges: addEdge({ ...conn, type: 'attach' }, s.edges) }
-      }
-      // A personality wired into a session is one that session may spawn.
-      if (isPersonality(source) && isSession(target)) {
         return { edges: addEdge({ ...conn, type: 'attach' }, s.edges) }
       }
       // A folder wired into a session IS that session's cwd. Only one may be,
@@ -454,11 +422,10 @@ export const useStore = create<State>((set, get) => ({
       id,
       type: 'session',
       position: pos,
-      // Fixed from birth: a transcript that sizes the node would push the rest
-      // of the canvas around every time the agent wrote a line. Growing is the
-      // user's call, via the resizer.
-      width: 400,
-      height: 340,
+      // One size for every agent: the node is an identifier, and the work it
+      // is doing is read in the panel rather than inside the node.
+      width: SESSION_SIZE.w,
+      height: SESSION_SIZE.h,
       data: {
         sessionId,
         provider,
@@ -627,48 +594,40 @@ export const useStore = create<State>((set, get) => ({
     return id
   },
 
-  addPersonality: (pos, seed) => {
-    const id = `node_${uid()}`
-    const node: GtNode = {
-      id,
-      type: 'personality',
-      position: pos,
-      data: {
-        personalityId: `pers_${uid()}`,
-        name: seed?.name ?? 'new-personality',
-        description: seed?.description ?? 'When the orchestrator should use this',
-        provider: seed?.provider ?? 'claude',
-        permission: seed?.permission ?? 'auto',
-        effort: seed?.effort ?? 'medium',
-        instructions: seed?.instructions ?? '',
-        ...(seed?.model ? { model: seed.model } : {}),
-        ...(seed?.effort ? { effort: seed.effort } : {}),
-      },
-    }
-    set((s) => ({ nodes: [...s.nodes, node], selectedId: id }))
-    return id
-  },
+  /**
+   * The library's "add to canvas" used to drop a personality node — a template
+   * you then had to wire up. A persona describes an agent, so it makes one.
+   */
+  addSessionFromPersona: (persona, pos) => {
+    const id = get().addSession(persona.provider, pos)
+    const taken = new Set(
+      get()
+        .nodes.filter(isSession)
+        .filter((n) => n.id !== id)
+        .map((n) => n.data.name),
+    )
+    let name = persona.name
+    for (let i = 2; taken.has(name); i++) name = `${persona.name}-${i}`
 
-  addSummary: (pos, data) => {
-    const id = `node_${uid()}`
-    const node: GtNode = {
-      id,
-      type: 'summary',
-      position: pos,
-      // Never selected on arrival: a summary lands while the user is reading
-      // the transcript, and stealing selection mid-read is an interruption.
-      data: { ...data, summaryId: `sum_${uid()}`, ts: Date.now() },
-    }
-    set((s) => ({ nodes: [...s.nodes, node] }))
-    return id
-  },
-
-  updatePersonality: (nodeId, patch) =>
     set((s) => ({
       nodes: s.nodes.map((n) =>
-        n.id === nodeId && isPersonality(n) ? { ...n, data: { ...n.data, ...patch } } : n,
+        n.id === id && isSession(n)
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                name,
+                permission: persona.permission,
+                instructions: persona.instructions.trim(),
+                ...(persona.model ? { model: persona.model } : {}),
+                ...(persona.effort ? { effort: persona.effort } : {}),
+              },
+            }
+          : n,
       ) as GtNode[],
-    })),
+    }))
+    return id
+  },
 
   updateSkill: (nodeId, patch) =>
     set((s) => ({
@@ -693,6 +652,10 @@ export const useStore = create<State>((set, get) => ({
         n.id === nodeId && isSession(n) ? { ...n, data: { ...n.data, name } } : n,
       ) as GtNode[],
     })),
+
+  markNotificationsRead: () =>
+    set((s) => ({ notifications: s.notifications.map((n) => ({ ...n, read: true })) })),
+  clearNotifications: () => set({ notifications: [] }),
 
   setRightTab: (rightTab) => set({ rightTab, libraryOpen: true }),
   setChatTarget: (chatTarget) => set({ chatTarget }),
@@ -738,6 +701,13 @@ export const useStore = create<State>((set, get) => ({
     }
     void get().interrupt(nodeId)
   },
+
+  setInstructions: (nodeId, instructions) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === nodeId && isSession(n) ? { ...n, data: { ...n.data, instructions } } : n,
+      ) as GtNode[],
+    })),
 
   setPermission: (nodeId, permission) =>
     set((s) => ({
@@ -847,6 +817,13 @@ export const useStore = create<State>((set, get) => ({
       const rules = globalRulesBlock(s.globalRules)
       if (rules) parts.push(rules)
     }
+    // This agent's standing brief, when it is new or has been edited since.
+    const brief = (d.instructions ?? '').trim()
+    const briefChanged = brief !== (d.sentInstructions ?? '').trim()
+    if (brief && briefChanged) {
+      parts.push(`<canvastrator-role>\n${brief}\n</canvastrator-role>`)
+    }
+
     if (fileBlocks.length) {
       parts.push(fileBlocks.join('\n'))
     }
@@ -873,7 +850,7 @@ export const useStore = create<State>((set, get) => ({
     }
     // 3b. Everything this session may instantiate: personality nodes wired
     // into it, plus the persona library, which is available everywhere.
-    const roster = rosterFor(s.nodes, s.edges, s.library, nodeId)
+    const roster = rosterFor(s.library)
     if (d.role === 'orchestrator') {
       const list = roster.length
         ? roster
@@ -951,6 +928,7 @@ export const useStore = create<State>((set, get) => ({
                 cwd,
                 state: 'thinking',
                 awaitingUser: false,
+                ...(briefChanged ? { sentInstructions: brief } : {}),
                 turnStartedAt: Date.now(),
                 messages: [...n.data.messages, userMsg, pending],
               },
@@ -1169,8 +1147,9 @@ export const useStore = create<State>((set, get) => ({
             ts: Date.now(),
           }
           set((s) => ({ bus: [...s.bus, entry] }))
-          // …and onto the canvas, as a node of its own beside the session.
-          spawnTurnSummary(nodeId, last)
+          // …and into the bell, so a turn that finished while you were looking
+          // somewhere else is still there when you come back.
+          notifyTurn(nodeId, last, looksLikeQuestion(last.text))
           // Definitions first: a reply can invent a persona and spawn it in
           // the same breath, and the spawn resolves against the library.
           void maybeDefinePersonas(last.text).then(() => {
@@ -1245,15 +1224,15 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
   ).length
   if (mine >= MAX_AUTO_FILES_PER_SESSION) return
 
-  // Directly below the agent, centred on it — the same column the layout would
-  // put it in, so a canvas with auto-tidy off still reads the right way.
-  const width = (session.width as number | undefined) ?? 400
-  const height = (session.height as number | undefined) ?? 340
+  // Off the agent's right, stacked — the same lane the layout would put it in,
+  // so a canvas with auto-tidy off still reads the right way.
+  const width = (session.width as number | undefined) ?? SESSION_SIZE.w
+  const height = (session.height as number | undefined) ?? SESSION_SIZE.h
   const desired = {
-    x: session.position.x + (width - 224) / 2,
-    y: session.position.y + height + 28 + mine * 92,
-    w: 224,
-    h: 64,
+    x: session.position.x + width + 56,
+    y: session.position.y + (height - FILE_SIZE.h) / 2 + mine * (FILE_SIZE.h + 18),
+    w: FILE_SIZE.w,
+    h: FILE_SIZE.h,
   }
   // Never drop a node on top of one that's already there.
   const pos = findFreeSpot(
@@ -1291,77 +1270,42 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
  * summaries stack in a column to the left of the session, so the file nodes on
  * its right stay where they are.
  */
-function spawnTurnSummary(sessionNodeId: string, msg: Message) {
+/**
+ * Record what a finished turn amounted to.
+ *
+ * Replaces the summary node that used to land beside the agent. Same
+ * derivation — the headline is the agent's own first sentence — but it goes to
+ * the bell instead of onto the canvas, so a long-running canvas doesn't fill up
+ * with history that nobody is reading.
+ */
+function notifyTurn(sessionNodeId: string, msg: Message, awaitingUser: boolean) {
   const st = useStore.getState()
   const session = st.nodes.find((n) => n.id === sessionNodeId)
   if (!session || !isSession(session)) return
 
   const summary = summarizeTurn(msg)
   // A turn that said nothing quotable — pure tool noise, or an empty reply —
-  // gets no node. A blank card is worse than no card.
+  // is not worth an entry. A blank row is worse than no row.
   if (!summary.headline) return
 
-  const mine = st.nodes.filter(
-    (n): n is GtNode & { type: 'summary' } =>
-      isSummary(n) && n.data.sessionNodeId === sessionNodeId,
-  )
-  // Below the last one, so a summary never lands on top of its predecessor —
-  // including after the user has dragged them around.
-  const sessionHeight = (session.height as number | undefined) ?? 340
-  const sessionWidth = (session.width as number | undefined) ?? 400
-  const bottom = mine.reduce(
-    (y, n) => Math.max(y, n.position.y),
-    session.position.y + sessionHeight - SUMMARY_STEP + 28,
-  )
-  const pos = findFreeSpot(
-    {
-      x: session.position.x + (sessionWidth - SUMMARY_W) / 2,
-      y: bottom + SUMMARY_STEP,
-      w: SUMMARY_W,
-      h: SUMMARY_H,
-    },
-    st.nodes.filter((n) => n.id !== sessionNodeId).map(boxOf),
-  )
-
-  const id = useStore.getState().addSummary(pos, {
+  const entry: Notification = {
+    id: uid(),
     sessionNodeId,
     sessionName: session.data.name,
     provider: session.data.provider,
+    kind: awaitingUser ? 'question' : 'turn',
     headline: summary.headline,
     tools: summary.tools,
     toolCount: summary.toolCount,
-  })
-  markAutoPlaced(id)
+    ts: Date.now(),
+    read: false,
+  }
 
-  // Oldest first, so dropping the head of the list drops the stalest summary.
-  const stale = mine
-    .slice()
-    .sort((a, b) => a.data.ts - b.data.ts)
-    .slice(0, Math.max(0, mine.length + 1 - MAX_SUMMARIES_PER_SESSION))
-  const dropped = new Set(stale.map((n) => n.id))
-
+  // Newest first: the feed is read from the top, and the cap drops the stalest.
   useStore.setState((s) => ({
-    nodes: s.nodes.filter((n) => !dropped.has(n.id)),
-    edges: [
-      ...s.edges.filter((e) => !dropped.has(e.source) && !dropped.has(e.target)),
-      {
-        id: `sum_${uid()}`,
-        source: sessionNodeId,
-        sourceHandle: 'produces',
-        target: id,
-        targetHandle: 'summarizes',
-        type: 'summary',
-        data: { at: Date.now() },
-      },
-    ],
-    selectedId: dropped.has(s.selectedId ?? '') ? null : s.selectedId,
+    notifications: [entry, ...s.notifications].slice(0, MAX_NOTIFICATIONS),
   }))
 }
-
-/** Vertical pitch of the summary stack. */
-const SUMMARY_STEP = 116
-const SUMMARY_W = 260
-const SUMMARY_H = 96
 
 /** A canvas is not improved by fifty tool nodes from one chatty server. */
 const MAX_TOOL_NODES_PER_SERVER = 8
@@ -1626,7 +1570,7 @@ async function maybeSpawn(fromNodeId: string, text: string) {
   const parent = st.nodes.find((n) => n.id === fromNodeId)
   if (!parent || parent.type !== 'session') return
 
-  const roster = rosterFor(st.nodes, st.edges, st.library, fromNodeId)
+  const roster = rosterFor(st.library)
   const persona = roster.find((p) => p.name.toLowerCase() === personalityName.toLowerCase())
   if (!persona) {
     const known = roster.map((p) => p.name).join(', ')
@@ -1666,35 +1610,16 @@ async function maybeSpawn(fromNodeId: string, text: string) {
     return
   }
 
-  // A persona spawned straight from the library gets a node on the canvas,
-  // wired to the orchestrator that used it. The graph stays the record of what
-  // actually happened, even when the palette lives off-canvas.
-  let personalityNodeId = persona.nodeId
-  if (!personalityNodeId) {
-    personalityNodeId = useStore
-      .getState()
-      .addPersonality(
-        { x: parent.position.x + 480, y: parent.position.y - 40 },
-        nodeDataFromPersona(persona),
-      )
-    markAutoPlaced(personalityNodeId)
-    useStore.setState((s) => ({
-      edges: [
-        ...s.edges,
-        { id: `att_${uid()}`, source: personalityNodeId!, target: fromNodeId, type: 'attach' },
-      ],
-    }))
-  }
-
-  // Place the child below its parent, fanned out by sibling index.
+  // Place the child to the right of its parent — the direction the flow reads
+  // in — stepped down by sibling index so a squad fans into a column.
   const siblings = st.edges.filter((e) => e.type === 'spawn' && e.source === fromNodeId).length
   const parentSize = sizeOf(parent)
   const pos = findFreeSpot(
     {
-      x: parent.position.x + siblings * 440,
-      y: parent.position.y + parentSize.h + 120,
-      w: 400,
-      h: 340,
+      x: parent.position.x + parentSize.w + 150,
+      y: parent.position.y + siblings * (SESSION_SIZE.h + 52),
+      w: SESSION_SIZE.w,
+      h: SESSION_SIZE.h,
     },
     st.nodes.map(boxOf),
   )
@@ -1723,6 +1648,9 @@ async function maybeSpawn(fromNodeId: string, text: string) {
               permission: persona.permission,
               ...(persona.model ? { model: persona.model } : {}),
               effort: persona.effort ?? 'medium',
+              // The brief lives on the agent, so it survives and stays editable
+              // rather than being a one-shot message at the top of a transcript.
+              instructions: persona.instructions.trim(),
             },
           }
         : n,
@@ -1733,7 +1661,7 @@ async function maybeSpawn(fromNodeId: string, text: string) {
       {
         id: `spawn_${uid()}`,
         source: fromNodeId,
-        sourceHandle: 'produces',
+        sourceHandle: 'spawns',
         target: childId,
         targetHandle: 'spawned-by',
         type: 'spawn',
@@ -1748,19 +1676,9 @@ async function maybeSpawn(fromNodeId: string, text: string) {
     ],
   }))
 
-  // Flash the personality node so the spawn is visible on the canvas.
-  useStore.setState((s) => ({
-    nodes: s.nodes.map((n) =>
-      n.id === personalityNodeId && n.type === 'personality'
-        ? { ...n, data: { ...n.data, firedAt: Date.now() } }
-        : n,
-    ) as GtNode[],
-  }))
-
-  const brief = persona.instructions.trim()
-  await useStore
-    .getState()
-    .send(childId, brief ? `${brief}\n\n---\n\n${task}` : task)
+  // The brief rides on the child's own `instructions`, which `send` injects —
+  // prepending it here as well would send it twice.
+  await useStore.getState().send(childId, task)
 
   await whenIdle(childId)
 

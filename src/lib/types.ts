@@ -205,6 +205,22 @@ export type SessionNodeData = {
   /** Start of the turn in flight. Files touched since are the ones it's on. */
   turnStartedAt?: number
   permission: Permission
+  /**
+   * This agent's standing brief, prepended to every turn.
+   *
+   * Used to live on a separate personality node wired into the session. That
+   * put the settings for one agent in two places on the canvas and cost a node
+   * per agent, so it lives on the agent itself; the reusable *templates* are
+   * the persona library, which needs no canvas presence at all.
+   */
+  instructions?: string
+  /**
+   * The brief as the agent last received it. Resending an unchanged brief every
+   * turn is waste — the model already has it in history — but sending it only
+   * once means editing it does nothing to a running agent, which defeats
+   * putting it on the node. So it goes when it differs from this.
+   */
+  sentInstructions?: string
   /** The provider's own conversation id — how continuity survives a turn. */
   providerSessionId?: string
   messages: Message[]
@@ -285,6 +301,11 @@ export type McpToolNodeData = {
   lastAt: number
 }
 
+/**
+ * The shape a persona takes. No longer a node type — personas live in the
+ * library and are edited on the agent they configure — but canvases saved
+ * before that change still contain these, and the library still stores them.
+ */
 export type PersonalityNodeData = {
   personalityId: string
   name: string
@@ -306,18 +327,29 @@ export type PersonalityNodeData = {
  * turn ends. Written by Canvastrator from the reply, not by the agent — so it
  * costs nothing and can't be skipped by an agent that forgot to summarise.
  */
-export type SummaryNodeData = {
-  summaryId: string
-  /** The session node this is an account of. */
+/**
+ * One thing worth telling the user about, in a feed behind the bell.
+ *
+ * These used to be nodes on the canvas — one per finished turn, beside the
+ * agent that produced it. A busy canvas then spent most of its area on a
+ * history nobody was reading, and the nodes competed with the agents for
+ * attention. A feed you open when you want it costs no canvas at all.
+ */
+export type Notification = {
+  id: string
+  /** The agent this is about, so clicking through opens the right chat. */
   sessionNodeId: string
   sessionName: string
   provider: Provider
-  /** One line on what the turn did, in the agent's own words. */
+  /** `question` is a turn that ended waiting on the user — the urgent kind. */
+  kind: 'turn' | 'question' | 'error'
+  /** What happened, in the agent's own words where there are any. */
   headline: string
   /** Distinct tool names the turn used, in first-use order. */
   tools: string[]
   toolCount: number
   ts: number
+  read: boolean
 }
 
 export type SkillTrigger = 'on-attach' | 'manual' | 'always'

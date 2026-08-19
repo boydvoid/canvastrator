@@ -4,7 +4,7 @@ import { boxOf, findFreeSpot, layoutCanvas, sizeOf } from './layout'
 import type { GtNode } from './store'
 
 const session = (id: string, x = 0, y = 0): GtNode =>
-  ({ id, type: 'session', position: { x, y }, width: 400, height: 340, data: {} }) as never
+  ({ id, type: 'session', position: { x, y }, width: 260, height: 64, data: {} }) as never
 const file = (id: string, x = 0, y = 0): GtNode =>
   ({ id, type: 'file', position: { x, y }, data: {} }) as never
 const folder = (id: string): GtNode =>
@@ -35,7 +35,7 @@ function assertNoOverlaps(nodes: GtNode[], placed: Record<string, { x: number; y
 }
 
 describe('layoutCanvas', () => {
-  it('puts a folder beside its session and the files below it', () => {
+  it('puts a folder in front of its session and the files after it', () => {
     const nodes = [session('s1'), folder('f1'), file('a'), file('b')]
     const edges = [
       edge('f1', 's1', 'cwd'),
@@ -43,52 +43,67 @@ describe('layoutCanvas', () => {
       edge('s1', 'b', 'file'),
     ]
     const p = layoutCanvas(nodes, edges)
-    expect(p.f1.x).toBeLessThan(p.s1.x)
-    // Files hang under the agent that touched them, in its column.
-    expect(p.a.y).toBeGreaterThan(p.s1.y + 340)
+    // What was wired in enters on the left; what the agent touched leaves right.
+    expect(p.f1.x + 256).toBeLessThanOrEqual(p.s1.x)
+    expect(p.a.x).toBeGreaterThan(p.s1.x + 260)
     expect(p.b.y).toBeGreaterThan(p.a.y)
+    expect(p.b.x).toBe(p.a.x)
     assertNoOverlaps(nodes, p)
   })
 
-  it('stacks a session\'s files without overlapping them', () => {
+  it('grids a session\'s files rather than running them off the bottom', () => {
     const nodes = [session('s1'), ...Array.from({ length: 8 }, (_, i) => file(`f${i}`))]
     const edges = nodes.slice(1).map((n) => edge('s1', n.id, 'file'))
     const p = layoutCanvas(nodes, edges)
     const ys = nodes.slice(1).map((n) => p[n.id].y)
-    expect(new Set(ys).size).toBe(8)
+    const xs = nodes.slice(1).map((n) => p[n.id].x)
+    // Eight files go two wide and four deep, not eight deep — a column that
+    // long pushes the next agent's whole strip off the screen.
+    expect(new Set(xs).size).toBe(2)
+    expect(new Set(ys).size).toBe(4)
     assertNoOverlaps(nodes, p)
   })
 
-  it('hangs a spawned child below its parent, not beside it', () => {
+  it('keeps a couple of files in a plain column under the agent', () => {
+    const nodes = [session('s1'), file('a'), file('b')]
+    const edges = [edge('s1', 'a', 'file'), edge('s1', 'b', 'file')]
+    const p = layoutCanvas(nodes, edges)
+    expect(p.a.x).toBe(p.b.x)
+    expect(p.b.y).toBeGreaterThan(p.a.y)
+    assertNoOverlaps(nodes, p)
+  })
+
+  it('hangs a spawned child to the right of its parent, not under it', () => {
     const nodes = [session('parent'), session('child')]
     const edges = [edge('parent', 'child', 'spawn')]
     const p = layoutCanvas(nodes, edges)
-    expect(p.child.y).toBeGreaterThan(p.parent.y + 340)
-    // An only child sits directly under the parent.
-    expect(p.child.x).toBe(p.parent.x)
+    expect(p.child.x).toBeGreaterThan(p.parent.x + 260)
+    // An only child sits level with its parent.
+    expect(p.child.y).toBe(p.parent.y)
     assertNoOverlaps(nodes, p)
   })
 
-  /** The shape in the reference: one orchestrator, a row of agents beneath. */
-  it('spreads siblings across a row and centres the parent over them', () => {
+  /** The shape of a horizontal flow: one orchestrator, a column of agents to
+   *  its right. */
+  it('stacks siblings in a column and centres the parent against them', () => {
     const nodes = [session('orch'), session('a'), session('b'), session('c')]
     const edges = ['a', 'b', 'c'].map((c) => edge('orch', c, 'spawn'))
     const p = layoutCanvas(nodes, edges)
 
-    // All three on the same row, left to right, below the orchestrator.
-    expect(p.a.y).toBe(p.b.y)
-    expect(p.b.y).toBe(p.c.y)
-    expect(p.a.y).toBeGreaterThan(p.orch.y + 340)
-    expect(p.a.x).toBeLessThan(p.b.x)
-    expect(p.b.x).toBeLessThan(p.c.x)
+    // All three in the same column, top to bottom, right of the orchestrator.
+    expect(p.a.x).toBe(p.b.x)
+    expect(p.b.x).toBe(p.c.x)
+    expect(p.a.x).toBeGreaterThan(p.orch.x + 260)
+    expect(p.a.y).toBeLessThan(p.b.y)
+    expect(p.b.y).toBeLessThan(p.c.y)
 
-    // The orchestrator sits over the middle of the row.
-    const rowCentre = (p.a.x + p.c.x + 400) / 2
-    expect(Math.abs(p.orch.x + 200 - rowCentre)).toBeLessThanOrEqual(1)
+    // The orchestrator sits against the middle of the column.
+    const colCentre = (p.a.y + p.c.y + 64) / 2
+    expect(Math.abs(p.orch.y + 32 - colCentre)).toBeLessThanOrEqual(1)
     assertNoOverlaps(nodes, p)
   })
 
-  it('keeps each agent\'s files in that agent\'s own column', () => {
+  it('keeps each agent\'s files in that agent\'s own strip', () => {
     const nodes = [session('orch'), session('a'), session('b'), file('af'), file('bf')]
     const edges = [
       edge('orch', 'a', 'spawn'),
@@ -97,14 +112,15 @@ describe('layoutCanvas', () => {
       edge('b', 'bf', 'file'),
     ]
     const p = layoutCanvas(nodes, edges)
-    // Centred under its own agent, and clear of the neighbouring column.
-    expect(Math.abs(p.af.x + 112 - (p.a.x + 200))).toBeLessThanOrEqual(1)
-    expect(Math.abs(p.bf.x + 112 - (p.b.x + 200))).toBeLessThanOrEqual(1)
-    expect(p.af.x).toBeLessThan(p.b.x)
+    // Off its own agent's right, level with it, and clear of the next strip.
+    expect(p.af.x).toBeGreaterThan(p.a.x + 260)
+    expect(p.bf.x).toBeGreaterThan(p.b.x + 260)
+    expect(Math.abs(p.af.y + 19 - (p.a.y + 32))).toBeLessThanOrEqual(1)
+    expect(p.af.y).toBeLessThan(p.b.y)
     assertNoOverlaps(nodes, p)
   })
 
-  it('tucks a server\'s tool nodes under the server, not in the orphan row', () => {
+  it('puts a server\'s tool nodes between it and the agent, not in the orphan row', () => {
     const nodes: GtNode[] = [
       session('s1'),
       { id: 'mcp1', type: 'mcp', position: { x: 0, y: 0 }, data: {} } as never,
@@ -112,8 +128,8 @@ describe('layoutCanvas', () => {
     ]
     const edges = [edge('mcp1', 's1', 'attach'), edge('mcp1', 'tool1', 'mcpuse')]
     const p = layoutCanvas(nodes, edges)
-    expect(p.tool1.y).toBeGreaterThan(p.mcp1.y)
-    expect(p.tool1.x).toBeGreaterThanOrEqual(p.mcp1.x)
+    // Server, then its tools, then the agent they were called from.
+    expect(p.tool1.x).toBeGreaterThan(p.mcp1.x)
     expect(p.tool1.x).toBeLessThan(p.s1.x)
     assertNoOverlaps(nodes, p)
   })
@@ -122,16 +138,16 @@ describe('layoutCanvas', () => {
    * Pins the dagre ordering workaround. If a dagre upgrade stops reversing
    * sibling order, this fails rather than silently mirroring every canvas.
    */
-  it('orders siblings by spawn order, left to right', () => {
+  it('orders siblings by spawn order, top to bottom', () => {
     const kids = ['a', 'b', 'c', 'd', 'e']
     const nodes = [session('orch'), ...kids.map((k) => session(k))]
     const edges = kids.map((k) => edge('orch', k, 'spawn'))
     const p = layoutCanvas(nodes, edges)
-    const byX = [...kids].sort((l, r) => p[l].x - p[r].x)
-    expect(byX).toEqual(kids)
+    const byY = [...kids].sort((l, r) => p[l].y - p[r].y)
+    expect(byY).toEqual(kids)
   })
 
-  it('keeps a grandchild under its own parent, not the orchestrator', () => {
+  it('keeps a grandchild beside its own parent, not the orchestrator', () => {
     const nodes = ['orch', 'a', 'b', 'a1', 'a2'].map((id) => session(id))
     const edges = [
       edge('orch', 'a', 'spawn'),
@@ -140,10 +156,10 @@ describe('layoutCanvas', () => {
       edge('a', 'a2', 'spawn'),
     ]
     const p = layoutCanvas(nodes, edges)
-    expect(p.a1.y).toBeGreaterThan(p.a.y + 340)
-    expect(p.a1.x).toBeLessThan(p.a2.x)
-    // `a` sits over the middle of its own two children.
-    expect(Math.abs(p.a.x - (p.a1.x + p.a2.x) / 2)).toBeLessThanOrEqual(1)
+    expect(p.a1.x).toBeGreaterThan(p.a.x + 260)
+    expect(p.a1.y).toBeLessThan(p.a2.y)
+    // `a` sits against the middle of its own two children.
+    expect(Math.abs(p.a.y - (p.a1.y + p.a2.y) / 2)).toBeLessThanOrEqual(1)
     assertNoOverlaps(nodes, p)
   })
 
@@ -189,9 +205,9 @@ describe('findFreeSpot', () => {
 
   /** The bug in the screenshot: a new file node landed on top of an existing one. */
   it('moves clear of a node already there', () => {
-    const taken = [{ x: 0, y: 0, w: 224, h: 64 }]
-    const spot = findFreeSpot({ x: 0, y: 0, w: 224, h: 64 }, taken)
-    expect(spot.y).toBeGreaterThanOrEqual(64)
+    const taken = [{ x: 0, y: 0, w: 196, h: 38 }]
+    const spot = findFreeSpot({ x: 0, y: 0, w: 196, h: 38 }, taken)
+    expect(spot.y).toBeGreaterThanOrEqual(38)
   })
 
   it('keeps the x it was given', () => {
@@ -207,8 +223,8 @@ describe('findFreeSpot', () => {
 
 describe('sizeOf', () => {
   it('prefers a measured size, falls back per node type', () => {
-    expect(sizeOf(session('s', 0, 0))).toEqual({ w: 400, h: 340 })
-    expect(sizeOf(file('f'))).toEqual({ w: 224, h: 64 })
+    expect(sizeOf(session('s', 0, 0))).toEqual({ w: 260, h: 64 })
+    expect(sizeOf(file('f'))).toEqual({ w: 196, h: 38 })
   })
 })
 
@@ -226,18 +242,19 @@ describe('layoutCanvas — ownership', () => {
     const nodes = [session('s1', 1000, 2000), file('f', 0, 0)]
     const edges = [edge('s1', 'f', 'file')]
     const placed = layoutCanvas(nodes, edges, new Set(['f']))
-    // Below the session's real position, not the layout's idea of it.
-    expect(placed.f.y).toBeGreaterThan(2000 + 340)
-    expect(placed.f.x).toBeGreaterThanOrEqual(1000)
+    // Off the session's real position, not the layout's idea of it.
+    expect(placed.f.x).toBeGreaterThan(1000 + 260)
+    // Level with the session's own centre line, not the layout's.
+    expect(placed.f.y).toBe(2000 + (64 - 38) / 2)
   })
 
   it('moves an agent node clear of a user node it would have landed on', () => {
-    const nodes = [session('s1', 0, 0), file('blocker', 88, 368), file('f', 0, 0)]
+    const nodes = [session('s1', 0, 0), file('blocker', 316, 13), file('f', 0, 0)]
     const edges = [edge('s1', 'f', 'file')]
     const placed = layoutCanvas(nodes, edges, new Set(['f']))
     const b = boxOf(nodes[1])
     const hit =
-      placed.f.x < b.x + b.w && placed.f.x + 224 > b.x && placed.f.y < b.y + b.h && placed.f.y + 64 > b.y
+      placed.f.x < b.x + b.w && placed.f.x + 196 > b.x && placed.f.y < b.y + b.h && placed.f.y + 38 > b.y
     expect(hit, 'agent node overlaps the user-placed one').toBe(false)
   })
 
