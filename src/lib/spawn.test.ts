@@ -159,3 +159,62 @@ Work in /Users/me/repo.`
     expect(parseSpawn('I could spawn a worker for this.')).toBeNull()
   })
 })
+
+describe('sending to a busy session', () => {
+  const session = (id: string, state: 'idle' | 'thinking' | 'streaming') =>
+    ({
+      id,
+      type: 'session' as const,
+      position: { x: 0, y: 0 },
+      data: {
+        sessionId: `s_${id}`,
+        provider: 'claude',
+        role: 'worker',
+        name: id,
+        cwd: '/tmp',
+        state,
+        permission: 'auto',
+        messages: [],
+        usage: { costUsd: 0, inputTokens: 0, outputTokens: 0 },
+        skillIds: [],
+      },
+    }) as never
+
+  /**
+   * The bug: the guard only checked `thinking`, but a session is `streaming`
+   * for most of its turn — so a message typed mid-reply reached the backend,
+   * was refused, and the refusal landed in the transcript as a red error.
+   */
+  it('holds a message typed while the agent is streaming', async () => {
+    const { useStore } = await import('./store')
+    useStore.setState({ nodes: [session('a', 'streaming')] as never, queued: {} })
+    await useStore.getState().send('a', 'while streaming')
+    expect(useStore.getState().queued.a).toEqual(['while streaming'])
+  })
+
+  it('holds a message typed while the agent is thinking', async () => {
+    const { useStore } = await import('./store')
+    useStore.setState({ nodes: [session('a', 'thinking')] as never, queued: {} })
+    await useStore.getState().send('a', 'while thinking')
+    expect(useStore.getState().queued.a).toEqual(['while thinking'])
+  })
+
+  it('keeps several in the order they were typed', async () => {
+    const { useStore } = await import('./store')
+    useStore.setState({ nodes: [session('a', 'streaming')] as never, queued: {} })
+    await useStore.getState().send('a', 'first')
+    await useStore.getState().send('a', 'second')
+    expect(useStore.getState().queued.a).toEqual(['first', 'second'])
+  })
+
+  it('queues per session, not globally', async () => {
+    const { useStore } = await import('./store')
+    useStore.setState({
+      nodes: [session('a', 'streaming'), session('b', 'streaming')] as never,
+      queued: {},
+    })
+    await useStore.getState().send('a', 'for a')
+    await useStore.getState().send('b', 'for b')
+    expect(useStore.getState().queued).toEqual({ a: ['for a'], b: ['for b'] })
+  })
+})

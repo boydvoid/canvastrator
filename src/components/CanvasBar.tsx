@@ -25,6 +25,7 @@ import {
   saveCanvasAs,
 } from '@/lib/canvas'
 import type { CanvasMeta } from '@/lib/persist'
+import { SHORTCUT_LABEL } from '@/lib/shortcuts'
 import { useStore } from '@/lib/store'
 import { cn, timeAgo as when } from '@/lib/utils'
 
@@ -63,6 +64,10 @@ export function CanvasMenuItems() {
       <ContextMenuItem onSelect={() => newCanvas()} className="justify-between">
         New canvas
         <span className="font-mono text-[10px] text-fg-faint">⌘N</span>
+      </ContextMenuItem>
+      <ContextMenuItem onSelect={() => setDialog('rules')} className="justify-between">
+        Global rules…
+        <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.rules}</span>
       </ContextMenuItem>
       <ContextMenuSeparator />
     </>
@@ -168,6 +173,7 @@ function CanvasSwitcher() {
         >
           Rename…
         </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => setDialog('rules')}>Global rules…</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => setDialog('save-as')}>Save a copy…</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => newCanvas()} className="justify-between">
           New canvas
@@ -203,7 +209,7 @@ export function CanvasStatus() {
   )
 }
 
-/** Open / Save-as overlays, plus the shortcuts that raise them. */
+/** Open / Save-as / rules overlays, plus the shortcuts that raise them. */
 export function CanvasDialogs() {
   const dialog = useStore((s) => s.canvasDialog)
   const setDialog = useStore((s) => s.setCanvasDialog)
@@ -234,7 +240,7 @@ export function CanvasDialogs() {
   if (!dialog) return null
   return (
     <Shell onClose={() => setDialog(null)}>
-      {dialog === 'open' ? <OpenPanel /> : <SavePanel />}
+      {dialog === 'open' ? <OpenPanel /> : dialog === 'rules' ? <RulesPanel /> : <SavePanel />}
     </Shell>
   )
 }
@@ -285,6 +291,40 @@ function ErrorLine() {
     <div className="shrink-0 border-t border-line-soft bg-[color-mix(in_oklch,var(--color-danger)_12%,transparent)] px-3 py-1.5 font-mono text-[11px] text-[var(--color-danger)]">
       {error}
     </div>
+  )
+}
+
+/**
+ * The canvas's global rules. Every keystroke goes straight to the store, which
+ * is what marks the canvas dirty and lets autosave write it — there is no Save
+ * button here because there is nothing a Save button would do that closing the
+ * panel doesn't already.
+ */
+function RulesPanel() {
+  const rules = useStore((s) => s.globalRules)
+  const setRules = useStore((s) => s.setGlobalRules)
+  const setDialog = useStore((s) => s.setCanvasDialog)
+
+  return (
+    <>
+      <Header title="Canvas global rules" onClose={() => setDialog(null)} />
+      <div className="flex min-h-0 flex-1 flex-col gap-2 p-3">
+        <p className="shrink-0 font-mono text-[10.5px] text-fg-subtle">
+          Given to every agent spawned on this canvas, orchestrator included. Agents already
+          running keep the rules they started with.
+        </p>
+        <textarea
+          autoFocus
+          value={rules}
+          onChange={(e) => setRules(e.target.value)}
+          onKeyDown={(e) => e.stopPropagation()}
+          rows={12}
+          placeholder="e.g. Never commit or push. Run the tests before reporting done."
+          className="min-h-0 flex-1 resize-none rounded-md border border-line bg-canvas p-2 font-mono text-[11px] leading-relaxed text-fg outline-none placeholder:text-fg-faint focus:border-line-strong"
+        />
+      </div>
+      <ErrorLine />
+    </>
   )
 }
 

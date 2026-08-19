@@ -29,6 +29,15 @@ export function AppBar({
   const toggleAutoTidy = useStore((s) => s.toggleAutoTidy)
 
   const folders = nodes.filter((n) => n.type === 'folder').length
+  // A canvas can sit stalled on a question nobody noticed. Surface it where
+  // the eye already goes for status, and make clicking it go there.
+  const waiting = nodes.filter(
+    (n) => n.type === 'session' && n.data.awaitingUser && n.data.state === 'idle',
+  )
+  const working = nodes.filter(
+    (n) =>
+      n.type === 'session' && (n.data.state === 'thinking' || n.data.state === 'streaming'),
+  )
   const sessions = nodes.filter((n) => n.type === 'session').length
   const totalCost = nodes.reduce(
     (acc, n) => acc + (n.type === 'session' ? n.data.usage.costUsd : 0),
@@ -73,6 +82,33 @@ export function AppBar({
       <span className="font-mono text-[11px] text-fg-muted" data-tauri-drag-region>
         {folders === 0 ? 'no folder yet' : `${folders} folder${folders > 1 ? 's' : ''}`}
       </span>
+
+      {working.length > 0 && (
+        <span className="flex items-center gap-1.5 font-mono text-[11px] text-fg-muted">
+          <span className="gt-caret">●</span>
+          {working.length === 1
+            ? `${working[0].type === 'session' ? working[0].data.name : ''} working`
+            : `${working.length} working`}
+        </span>
+      )}
+
+      {waiting.length > 0 && (
+        <button
+          onClick={() => {
+            const first = waiting[0]
+            useStore.getState().setChatTarget(first.id)
+            useStore.getState().setRightTab('chat')
+          }}
+          className="rounded px-1.5 py-0.5 font-mono text-[11px]"
+          style={{
+            background: 'color-mix(in oklch, var(--color-claude) 18%, transparent)',
+            color: 'var(--color-claude)',
+          }}
+          title="An agent ended its turn with a question. Click to open it."
+        >
+          {waiting.length} waiting on you
+        </button>
+      )}
 
       <div data-tauri-drag-region className="ml-auto flex items-center gap-2.5">
         <button

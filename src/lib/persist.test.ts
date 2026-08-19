@@ -34,6 +34,8 @@ const snapshot = (nodes: GtNode[], edges: Edge[] = []) => ({
   bus: [],
   delivered: {},
   cwd: '/tmp',
+  autoPlaced: new Set<string>(),
+  globalRules: '',
 })
 
 describe('serializeCanvas', () => {
@@ -98,6 +100,11 @@ describe('serializeCanvas', () => {
     expect(serializeCanvas(snapshot([session('a')], edges)).edges).toEqual([])
   })
 
+  it('saves the canvas global rules', () => {
+    const data = serializeCanvas({ ...snapshot([]), globalRules: 'Never push to main.' })
+    expect(data.globalRules).toBe('Never push to main.')
+  })
+
   it('flattens delivered sets so the doc is JSON', () => {
     const data = serializeCanvas({ ...snapshot([]), delivered: { s1: new Set(['x', 'y']) } })
     expect(data.delivered).toEqual({ s1: ['x', 'y'] })
@@ -128,7 +135,15 @@ describe('deserializeCanvas', () => {
       expect(s.bus).toEqual([])
       expect(s.delivered).toEqual({})
       expect(s.cwd).toBe('')
+      // A canvas saved before global rules existed must still open.
+      expect(s.globalRules).toBe('')
     }
+  })
+
+  it('round-trips the canvas global rules', () => {
+    const before = { ...snapshot([session('a')]), globalRules: 'Never push to main.' }
+    const after = deserializeCanvas(JSON.parse(JSON.stringify(serializeCanvas(before))))
+    expect(after.globalRules).toBe('Never push to main.')
   })
 
   it('skips nodes without an id or type', () => {

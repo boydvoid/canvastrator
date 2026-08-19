@@ -41,6 +41,8 @@ export type CanvasData = {
   cwd: string
   /** Node ids the layout owns. Everything else the user placed. */
   autoPlaced?: string[]
+  /** Free-text rules every agent on this canvas is spawned with. */
+  globalRules?: string
 }
 
 /** The slice of the store a canvas is made of. */
@@ -51,6 +53,7 @@ export type CanvasSnapshot = {
   delivered: Record<string, Set<string>>
   cwd: string
   autoPlaced: Set<string>
+  globalRules: string
 }
 
 /**
@@ -117,6 +120,7 @@ export function serializeCanvas(s: CanvasSnapshot): CanvasData {
     // Tolerant of a snapshot without the field: a missing set should never
     // be the reason a canvas fails to save.
     autoPlaced: [...(s.autoPlaced ?? [])].filter((id) => ids.has(id)),
+    globalRules: s.globalRules ?? '',
   }
 }
 
@@ -157,5 +161,8 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
     // Absent in canvases saved before this existed. Empty means the layout
     // owns nothing, which errs toward leaving the user's arrangement alone.
     autoPlaced: new Set(data?.autoPlaced ?? []),
+    // Absent in canvases saved before this existed, and empty means the same
+    // thing it does when the user clears the field: inject nothing.
+    globalRules: data?.globalRules ?? '',
   }
 }

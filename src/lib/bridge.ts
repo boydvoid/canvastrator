@@ -65,6 +65,11 @@ export const listProjectFiles = (roots: string[], query: string, limit = 40) =>
 export const discoverMcpServers = (cwd: string | null) =>
   invoke<McpServer[]>('discover_mcp_servers', { cwd })
 
+export type DiffBase = { original: string | null; reason: string | null; rel: string | null }
+
+/** The committed version of a file, to diff the working copy against. */
+export const fileDiffBase = (path: string) => invoke<DiffBase>('file_diff_base', { path })
+
 export const dirExists = (path: string) => invoke<boolean>('dir_exists', { path })
 
 export const listCanvases = () => invoke<CanvasMeta[]>('list_canvases')

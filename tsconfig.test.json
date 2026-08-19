@@ -1,0 +1,29 @@
+{
+  /*
+   * The tests, which tsconfig.app.json excludes.
+   *
+   * They're excluded there because they need types the app must never have —
+   * `vi`, `node:fs` — and letting the app project see those types is how test
+   * helpers end up imported into shipped code. But excluding them left them in
+   * no project at all, so editors fell back to compiler defaults: no `@/*`
+   * alias, no `vi`, no top-level await. Everything was underlined, and none of
+   * it was wrong.
+   *
+   * Referenced from the root tsconfig, so `tsc -b` typechecks the tests too.
+   * They aren't bundled either way — vite builds from the app entry — but type
+   * rot in a test is still rot, and it went unnoticed the whole time nothing
+   * was checking.
+   */
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    // `node` because tests read fixtures off disk; the app never can.
+    "types": ["vite/client", "vitest/globals", "node"],
+    // A test that imports a module for its side effects, or binds a value only
+    // to assert on its type, is fine. Only the app has to stay tidy.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx"],
+  "exclude": []
+}

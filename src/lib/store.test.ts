@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Edge } from '@xyflow/react'
-import { basename, resolveCwd, type GtNode } from './store'
+import { basename, globalRulesBlock, resolveCwd, type GtNode } from './store'
 
 const folder = (id: string, path: string): GtNode => ({
   id,
@@ -83,5 +83,19 @@ describe('resolveCwd', () => {
   it('returns null when the edge source node is gone', () => {
     const edges = [cwdEdge('missing', 's1')]
     expect(resolveCwd(nodes, edges, 's1')).toBeNull()
+  })
+})
+
+describe('globalRulesBlock', () => {
+  it('wraps the rules verbatim', () => {
+    expect(globalRulesBlock('Never push to main.\nRun the tests.')).toBe(
+      '<canvas-global-rules>\nNever push to main.\nRun the tests.\n</canvas-global-rules>',
+    )
+  })
+
+  it('injects nothing when there are no rules', () => {
+    // Empty tags would read as "you have been given rules, and they are none".
+    expect(globalRulesBlock('')).toBe('')
+    expect(globalRulesBlock('  \n\t ')).toBe('')
   })
 })

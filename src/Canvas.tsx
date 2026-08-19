@@ -10,6 +10,7 @@ import {
 } from '@xyflow/react'
 import { CanvasDialogs, CanvasMenuItems } from '@/components/CanvasBar'
 import { AppBar } from '@/components/AppBar'
+import { PanelDivider } from '@/components/PanelDivider'
 import { Sidebar } from '@/components/Sidebar'
 import { edgeTypes } from '@/components/edges'
 import { FileViewer } from '@/components/FileViewer'
@@ -47,7 +48,8 @@ import {
   watchCompletion,
   watchLayout,
 } from '@/lib/canvas'
-import { useSidebar } from '@/lib/sidebar'
+import { togglePanels, usePanels } from '@/lib/panels'
+import { SHORTCUT_LABEL, keyToCanvasAction, shouldIgnoreShortcut } from '@/lib/shortcuts'
 import { useStore } from '@/lib/store'
 import { PROVIDER_ACCENT, PROVIDER_LABEL, type Provider } from '@/lib/types'
 
@@ -84,21 +86,20 @@ function Surface() {
     useStore.getState()
 
   const wrapper = useRef<HTMLDivElement>(null)
+  const pointer = useRef<{ x: number; y: number } | null>(null)
   const { screenToFlowPosition, fitView } = useReactFlow()
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === 'l' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
-        e.preventDefault()
-        useStore.getState().tidy()
-        setTimeout(() => fitView({ duration: 400, padding: 0.15 }), 60)
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [fitView])
+  // Where a keyboard-added node lands: under the cursor, the same place the
+  // right-click menu drops one — or the middle of the canvas if the mouse has
+  // never been over it.
+  const dropScreen = useCallback(() => {
+    if (pointer.current) return pointer.current
+    const r = wrapper.current?.getBoundingClientRect()
+    return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : { x: 0, y: 0 }
+  }, [])
+
   const [menuAt, setMenuAt] = useState({ x: 0, y: 0 })
-  const { collapsed, toggle } = useSidebar()
+  const { collapsed, widths } = usePanels()
 
   const spawnAt = useCallback(
     (provider: Provider, screen: { x: number; y: number }) => {
@@ -117,6 +118,63 @@ function Surface() {
 
   const spawn = useCallback((provider: Provider) => spawnAt(provider, menuAt), [spawnAt, menuAt])
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'l' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+        e.preventDefault()
+        useStore.getState().tidy()
+        setTimeout(() => fitView({ duration: 400, padding: 0.15 }), 60)
+        return
+      }
+
+      if (shouldIgnoreShortcut(e.target)) return
+      const st = useStore.getState()
+      // A dialog or the file editor owns the keyboard while it is up.
+      if (st.canvasDialog || st.openFilePath) return
+      const action = keyToCanvasAction(e)
+      if (!action) return
+      e.preventDefault()
+
+      const at = () => screenToFlowPosition(dropScreen())
+      switch (action) {
+        case 'session': {
+          // No provider to pick from the keyboard, so take the first one that
+          // is actually installed; the submenu stays there for the choice.
+          const provider = st.providers.find((p) => p.available)?.provider
+          if (provider) spawnAt(provider, dropScreen())
+          break
+        }
+        case 'folder': {
+          const pos = at()
+          void pickPath(true).then((picked) => picked && st.addFolder(picked, pos))
+          break
+        }
+        case 'file': {
+          const pos = at()
+          void pickPath(false).then((picked) => picked && st.addFile(picked, pos))
+          break
+        }
+        case 'skill':
+          st.addSkill(at())
+          break
+        case 'personality':
+          st.addPersonality(at())
+          break
+        case 'tidy':
+          st.tidy(true)
+          break
+        case 'rules':
+          st.setCanvasDialog('rules')
+          break
+        case 'delete':
+          st.nodes.filter((n) => n.selected).forEach((n) => st.removeNode(n.id))
+          break
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [dropScreen, fitView, screenToFlowPosition, spawnAt])
+
 
   const tidyAndFit = useCallback(() => {
     useStore.getState().tidy()
@@ -126,12 +184,13 @@ function Surface() {
 
   return (
     <div className="flex h-full w-full flex-col">
-      <AppBar collapsed={collapsed} onToggleSidebar={toggle} onTidy={tidyAndFit} />
+      <AppBar collapsed={collapsed} onToggleSidebar={togglePanels} onTidy={tidyAndFit} />
 
       {/* Panels float: rounded, with the window's own translucency showing
           through the gaps between them. */}
       <div className="flex min-h-0 flex-1 gap-2 px-2 pb-2">
-        <Sidebar collapsed={collapsed} onToggle={toggle} />
+        <Sidebar collapsed={collapsed} onToggle={togglePanels} width={widths.canvases} />
+        {!collapsed && <PanelDivider panel="canvases" />}
 
         <div
           className="relative min-w-0 flex-1 overflow-hidden rounded-xl border border-line bg-canvas"
@@ -141,6 +200,9 @@ function Surface() {
           <ContextMenuTrigger asChild>
             <div
               className="h-full w-full"
+              onPointerMove={(e) => {
+                pointer.current = { x: e.clientX, y: e.clientY }
+              }}
               onContextMenu={(e) => {
               setMenuAt({ x: e.clientX, y: e.clientY })
               loadMcp()
@@ -192,7 +254,12 @@ function Surface() {
             <CanvasMenuItems />
             <ContextMenuLabel>New session</ContextMenuLabel>
             <ContextMenuSub>
-              <ContextMenuSubTrigger>Session</ContextMenuSubTrigger>
+              <ContextMenuSubTrigger>
+                Session
+                <span className="ml-auto font-mono text-[10px] text-fg-faint">
+                  {SHORTCUT_LABEL.session}
+                </span>
+              </ContextMenuSubTrigger>
               <ContextMenuSubContent>
                 {(['claude', 'codex', 'opencode'] as Provider[]).map((p) => {
                   const status = providers.find((s) => s.provider === p)
@@ -224,8 +291,10 @@ function Surface() {
                 const picked = await pickPath(true)
                 if (picked) addFolder(picked, pos)
               }}
+              className="justify-between"
             >
               Folder…
+              <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.folder}</span>
             </ContextMenuItem>
             <ContextMenuItem
               onSelect={async () => {
@@ -233,14 +302,26 @@ function Surface() {
                 const picked = await pickPath(false)
                 if (picked) addFile(picked, pos)
               }}
+              className="justify-between"
             >
               File…
+              <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.file}</span>
             </ContextMenuItem>
-            <ContextMenuItem onSelect={() => addSkill(screenToFlowPosition(menuAt))}>
+            <ContextMenuItem
+              onSelect={() => addSkill(screenToFlowPosition(menuAt))}
+              className="justify-between"
+            >
               Skill
+              <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.skill}</span>
             </ContextMenuItem>
-            <ContextMenuItem onSelect={() => addPersonality(screenToFlowPosition(menuAt))}>
+            <ContextMenuItem
+              onSelect={() => addPersonality(screenToFlowPosition(menuAt))}
+              className="justify-between"
+            >
               Personality
+              <span className="font-mono text-[10px] text-fg-faint">
+                {SHORTCUT_LABEL.personality}
+              </span>
             </ContextMenuItem>
             <ContextMenuSub>
               <ContextMenuSubTrigger>MCP</ContextMenuSubTrigger>
@@ -263,8 +344,12 @@ function Surface() {
               </ContextMenuSubContent>
             </ContextMenuSub>
             <ContextMenuSeparator />
-            <ContextMenuItem onSelect={() => useStore.getState().tidy(true)}>
+            <ContextMenuItem
+              onSelect={() => useStore.getState().tidy(true)}
+              className="justify-between"
+            >
               Tidy everything
+              <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.tidy}</span>
             </ContextMenuItem>
             <ContextMenuItem onSelect={() => newCanvas()}>Clear canvas</ContextMenuItem>
           </ContextMenuContent>

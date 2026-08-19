@@ -71,7 +71,7 @@ pub async fn run_turn(
     req: TurnRequest,
 ) -> Result<String, String> {
     if reg.is_busy(&req.session_id) {
-        return Err("session is already running a turn".into());
+        return Err("That agent is still working on its last message. Wait for it to finish, or press stop.".into());
     }
 
     let turn_id = uuid::Uuid::new_v4().to_string();

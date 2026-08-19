@@ -37,7 +37,11 @@ export function RightDock() {
   }
 
   return (
-    <aside className="flex h-full w-[26rem] shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
+    // Typing to an agent must never trip a canvas shortcut.
+    <aside
+      data-shortcuts="off"
+      className="flex h-full w-[26rem] shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel"
+    >
       <header className="flex shrink-0 items-center gap-1 border-b border-line-soft px-2 py-1.5">
         {(
           [

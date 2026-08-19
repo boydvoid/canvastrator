@@ -99,7 +99,10 @@ export async function saveCanvas(name?: string): Promise<boolean> {
     canvasName,
     canvasSavedAt: updatedAt,
     canvasDirty:
-      now.nodes !== written.nodes || now.edges !== written.edges || now.bus !== written.bus,
+      now.nodes !== written.nodes ||
+      now.edges !== written.edges ||
+      now.bus !== written.bus ||
+      now.globalRules !== written.globalRules,
     canvasError: null,
   })
   return true
@@ -173,6 +176,7 @@ export function newCanvas() {
       canvasDirty: false,
       canvasError: null,
       canvasDialog: null,
+      globalRules: '',
     }),
   )
 }
@@ -297,7 +301,11 @@ export function watchCanvas(): () => void {
   let seen = useStore.getState()
 
   const unsubscribe = useStore.subscribe((s) => {
-    const changed = s.nodes !== seen.nodes || s.edges !== seen.edges || s.bus !== seen.bus
+    const changed =
+      s.nodes !== seen.nodes ||
+      s.edges !== seen.edges ||
+      s.bus !== seen.bus ||
+      s.globalRules !== seen.globalRules
     seen = s
     if (!changed || loading) return
 

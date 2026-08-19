@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useStore } from '@/lib/store'
 import { cn } from '@/lib/utils'
 import type { SessionNodeData } from '@/lib/types'
 
@@ -33,13 +34,19 @@ export function formatElapsed(seconds: number): string {
  */
 export function RunningStatus({
   data,
+  nodeId,
   className,
 }: {
   data: SessionNodeData
+  nodeId?: string
   className?: string
 }) {
   const busy = data.state === 'thinking' || data.state === 'streaming'
   const elapsed = useElapsed(data.turnStartedAt, busy)
+  const queued = useStore((s) => (nodeId ? (s.queued[nodeId]?.length ?? 0) : 0))
+  // The turn is being thrown away and re-run at a new effort. Say so, or the
+  // transcript appears to lose a message for the moment it takes to restart.
+  const restarting = useStore((s) => (nodeId ? s.restarting[nodeId] !== undefined : false))
   if (!busy) return null
 
   const lastTool = data.messages.at(-1)?.tools.at(-1)
@@ -53,7 +60,9 @@ export function RunningStatus({
     >
       <span className="gt-caret shrink-0">●</span>
       {elapsed !== null && <span className="shrink-0 tabular-nums">{formatElapsed(elapsed)}</span>}
-      {data.notice ? (
+      {restarting ? (
+        <span className="truncate text-fg">restarting at {data.effort ?? 'default'} effort</span>
+      ) : data.notice ? (
         <span className="truncate text-fg" title={data.notice.detail}>
           {data.notice.label}
         </span>
@@ -64,6 +73,11 @@ export function RunningStatus({
         </span>
       ) : (
         <span className="truncate opacity-60">{data.state}</span>
+      )}
+      {queued > 0 && (
+        <span className="shrink-0 text-fg" title="Sent as soon as this turn finishes">
+          {queued} queued
+        </span>
       )}
       {/* A turn this long is usually waiting on the provider, not stuck. */}
       {elapsed !== null && elapsed > 120 && (

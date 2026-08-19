@@ -118,6 +118,8 @@ export type SessionNodeData = {
   state: SessionState
   /** Provider progress that isn't output — e.g. "retry 3/10" while overloaded. */
   notice?: { label: string; detail: string }
+  /** Set when the turn ended on a question, so the session is waiting on you. */
+  awaitingUser?: boolean
   /** Skills and slash commands this session reported at startup. */
   skills?: string[]
   commands?: string[]

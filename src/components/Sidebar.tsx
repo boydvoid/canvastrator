@@ -126,7 +126,16 @@ function Row({
  * managing them in bulk; this is the everyday switcher — one click, and you
  * can see what else is there without opening anything.
  */
-export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+export function Sidebar({
+  collapsed,
+  onToggle,
+  width,
+}: {
+  collapsed: boolean
+  onToggle: () => void
+  /** Owned by `panels.ts` — the divider beside this column writes it. */
+  width: number
+}) {
   const canvasId = useStore((s) => s.canvasId)
   const canvasName = useStore((s) => s.canvasName)
   const savedAt = useStore((s) => s.canvasSavedAt)
@@ -151,7 +160,10 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const unsaved = !canvasId && nodeCount > 0
 
   return (
-    <aside className="gt-sidebar flex h-full w-[232px] shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel">
+    <aside
+      className="gt-sidebar flex h-full shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel"
+      style={{ width }}
+    >
       <header className="flex shrink-0 items-center gap-2 px-3 pt-2.5 pb-1.5">
         <span className="font-mono text-[10px] tracking-widest text-fg-muted uppercase">
           Canvases

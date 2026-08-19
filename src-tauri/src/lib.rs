@@ -1,4 +1,5 @@
 mod canvas;
+mod diff;
 mod env;
 mod event;
 mod library;
@@ -256,6 +257,7 @@ pub fn run() {
             library::personas_location,
             skills::discover_skills,
             skills::list_project_files,
+            diff::file_diff_base,
             mcp::discover_mcp_servers
         ])
         .run(tauri::generate_context!())

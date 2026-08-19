@@ -3,7 +3,6 @@ import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   CircleStop,
-  CornerDownLeft,
   Eye,
   Hexagon,
   Pencil,
@@ -147,7 +146,6 @@ function PermissionBadge({ value, onChange }: { value: Permission; onChange: (p:
 
 function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'session' }>) {
   const d = data as SessionNodeData
-  const send = useStore((s) => s.send)
   const interrupt = useStore((s) => s.interrupt)
   const removeNode = useStore((s) => s.removeNode)
   const rename = useStore((s) => s.renameSession)
@@ -174,7 +172,6 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
         (s.chatTarget === null && d.role === 'orchestrator')),
   )
 
-  const [draft, setDraft] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const accent = PROVIDER_ACCENT[d.provider]
   const busy = d.state === 'thinking' || d.state === 'streaming'
@@ -207,13 +204,6 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
     const t = setTimeout(() => setFlash(false), 700)
     return () => clearTimeout(t)
   }, [d.firedAt])
-
-  const submit = () => {
-    const text = draft.trim()
-    if (!text || busy) return
-    setDraft('')
-    void send(id, text)
-  }
 
   return (
     <div
@@ -267,6 +257,18 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
           {PROVIDER_LABEL[d.provider]}
         </span>
         <PermissionBadge value={d.permission} onChange={(p) => setPermission(id, p)} />
+        {d.awaitingUser && !busy && (
+          <span
+            className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px]"
+            style={{
+              background: 'color-mix(in oklch, var(--color-claude) 22%, transparent)',
+              color: 'var(--color-claude)',
+            }}
+            title="This agent ended its turn with a question — it's waiting on you."
+          >
+            waiting on you
+          </span>
+        )}
         <span
           className={cn(
             'shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px]',
@@ -280,6 +282,16 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
         >
           {STATE_COPY[d.state]}
         </span>
+        {busy && (
+          <Button
+            variant="danger"
+            size="icon"
+            onClick={() => void interrupt(id)}
+            title="Interrupt this turn"
+          >
+            <CircleStop size={12} />
+          </Button>
+        )}
         <Button variant="ghost" size="icon" onClick={() => removeNode(id)} title="Delete session">
           <Trash2 size={12} />
         </Button>
@@ -288,7 +300,7 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
       {/* A slow turn must show it's alive, or it reads as a hung agent. */}
       {busy && (
         <div className="shrink-0 border-b border-line-soft px-2.5 py-0.5">
-          <RunningStatus data={d} />
+          <RunningStatus data={d} nodeId={id} />
         </div>
       )}
 
@@ -300,7 +312,9 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
       >
         {d.messages.length === 0 && (
           <p className="py-6 text-center font-mono text-[11px] text-fg-faint">
-            {cwd ? cwd.replace(/^\/Users\/[^/]+/, '~') : 'wire a folder node in to set a working directory'}
+            {cwd
+              ? `${cwd.replace(/^\/Users\/[^/]+/, '~')} · click to chat`
+              : 'wire a folder node in to set a working directory'}
           </p>
         )}
         {d.messages.map((m) => (
@@ -308,36 +322,11 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
         ))}
       </div>
 
-      {/* composer */}
+      {/* Replying happens in the chat panel — a composer per node meant a
+          dozen text boxes competing for the same job. What stays is the
+          transcript and the strip that says how this session is configured. */}
       <div className="shrink-0 border-t border-line-soft p-2">
-        <div className="flex items-end gap-1.5">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              // Enter sends, Shift+Enter newlines — same as the chat panel.
-              if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
-                e.preventDefault()
-                submit()
-              }
-            }}
-            rows={1}
-            placeholder={busy ? 'running…' : 'Message  ↵'}
-            className="nodrag max-h-24 min-h-[28px] flex-1 resize-none rounded-md border border-line bg-canvas px-2 py-1.5 text-[12px] text-fg outline-none placeholder:text-fg-faint focus:border-line-strong"
-          />
-          {busy ? (
-            <Button variant="danger" size="icon" onClick={() => void interrupt(id)} title="Interrupt">
-              <CircleStop size={13} />
-            </Button>
-          ) : (
-            <Button size="icon" onClick={submit} disabled={!draft.trim()} title="Send  ↵   ·   Shift ↵ for a new line">
-              <CornerDownLeft size={13} />
-            </Button>
-          )}
-        </div>
-
-        {/* capability + cost strip */}
-        <div className="mt-1.5 flex items-center gap-2 overflow-hidden">
+        <div className="flex items-center gap-2 overflow-hidden">
           {skills.map((sk) => (
             <span
               key={sk.id}

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import Editor from '@monaco-editor/react'
-import { FileWarning, Save, X } from 'lucide-react'
+import Editor, { DiffEditor } from '@monaco-editor/react'
+import { FileWarning, GitCompare, RotateCcw, Save, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { monacoTheme } from '@/lib/monaco'
 import { useTheme } from '@/lib/theme'
-import { readBinaryBase64, readTextFile, writeTextFile } from '@/lib/bridge'
+import { fileDiffBase, readBinaryBase64, readTextFile, writeTextFile } from '@/lib/bridge'
+import { computeHunks, describeHunk, hunkRange, revertHunk } from '@/lib/hunks'
 import { fileKind, mimeFor, monacoLanguage } from '@/lib/filekind'
 import { basename, useStore } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -28,6 +29,9 @@ export function FileViewer() {
   const [loaded, setLoaded] = useState<Loaded>({ state: 'loading' })
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
+  // The committed version, and whether we're showing the comparison.
+  const [base, setBase] = useState<{ original: string | null; reason: string | null } | null>(null)
+  const [diffing, setDiffing] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const originalRef = useRef('')
 
@@ -63,6 +67,13 @@ export function FileViewer() {
         setLoaded({ state: 'text', text: f.text, truncated: f.truncated, bytes: f.bytes })
       })
       .catch((e: unknown) => setLoaded({ state: 'error', message: String(e) }))
+
+    // Fetched alongside: whether there's anything to compare decides whether
+    // the diff toggle is even offered.
+    setDiffing(false)
+    fileDiffBase(path)
+      .then((b) => setBase({ original: b.original, reason: b.reason }))
+      .catch(() => setBase(null))
   }, [path, kind])
 
   const save = useCallback(async () => {
@@ -105,6 +116,7 @@ export function FileViewer() {
 
   return (
     <div
+      data-shortcuts="off"
       className="absolute inset-0 z-50 grid place-items-center bg-canvas/70 backdrop-blur-sm"
       onClick={close}
     >
@@ -130,6 +142,17 @@ export function FileViewer() {
           )}
 
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            {loaded.state === 'text' && base?.original != null && base.original !== draft && (
+              <Button
+                variant={diffing ? 'subtle' : 'ghost'}
+                size="xs"
+                onClick={() => setDiffing((v) => !v)}
+                title="Compare with the last commit"
+              >
+                <GitCompare size={11} />
+                {diffing ? 'editing' : `${computeHunks(base.original, draft).length} changes`}
+              </Button>
+            )}
             {loaded.state === 'text' && (
               <Button
                 variant={dirty ? 'default' : 'ghost'}
@@ -184,7 +207,7 @@ export function FileViewer() {
             ))}
 
           {/* .txt and friends get a plain text box, not a code editor. */}
-          {loaded.state === 'text' && kind === 'text' && (
+          {loaded.state === 'text' && !diffing && kind === 'text' && (
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -194,7 +217,79 @@ export function FileViewer() {
             />
           )}
 
-          {loaded.state === 'text' && kind === 'code' && (
+          {loaded.state === 'text' && diffing && base?.original != null && (
+            <div className="flex h-full min-h-0">
+              <div className="min-w-0 flex-1">
+                <DiffEditor
+                  height="100%"
+                  theme={monacoTheme(theme)}
+                  language={monacoLanguage(path)}
+                  original={base.original}
+                  modified={draft}
+                  onMount={(editor) => {
+                    // The right-hand side is the working file, so edits here
+                    // are edits to it — same as the plain editor.
+                    editor.getModifiedEditor().onDidChangeModelContent(() => {
+                      setDraft(editor.getModifiedEditor().getValue())
+                    })
+                  }}
+                  options={{
+                    readOnly: true,
+                    originalEditable: false,
+                    renderSideBySide: true,
+                    fontSize: 12.5,
+                    fontFamily: "'JetBrains Mono Variable', ui-monospace, Menlo, monospace",
+                    minimap: { enabled: false },
+                    scrollBeyondLastLine: false,
+                  }}
+                />
+              </div>
+
+              {/* One change at a time: an agent's edit is usually several
+                  unrelated changes and you want three of them, not all four. */}
+              <div className="w-56 shrink-0 space-y-1 overflow-y-auto border-l border-line-soft p-2">
+                <div className="px-1 pb-1 font-mono text-[10px] tracking-widest text-fg-muted uppercase">
+                  changes
+                </div>
+                {computeHunks(base.original, draft).map((h, i) => (
+                  <div
+                    key={`${h.modifiedStart}-${i}`}
+                    className="flex items-center gap-1.5 rounded border border-line bg-surface/40 px-1.5 py-1"
+                  >
+                    <span
+                      className={cn(
+                        'font-mono text-[9.5px]',
+                        describeHunk(h) === 'added'
+                          ? 'text-[var(--color-live)]'
+                          : describeHunk(h) === 'removed'
+                            ? 'text-[var(--color-danger)]'
+                            : 'text-fg-muted',
+                      )}
+                    >
+                      {describeHunk(h)}
+                    </span>
+                    <span className="truncate font-mono text-[9.5px] text-fg-faint">
+                      {hunkRange(h)}
+                    </span>
+                    <button
+                      onClick={() => setDraft(revertHunk(base.original!, draft, i))}
+                      className="ml-auto shrink-0 rounded p-0.5 text-fg-muted hover:bg-surface-2 hover:text-fg"
+                      title="Revert this change"
+                    >
+                      <RotateCcw size={10} />
+                    </button>
+                  </div>
+                ))}
+                {computeHunks(base.original, draft).length === 0 && (
+                  <p className="px-1 py-2 text-[10.5px] leading-snug text-fg-faint">
+                    Matches the last commit.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {loaded.state === 'text' && !diffing && kind === 'code' && (
             <Editor
               height="100%"
               theme={monacoTheme(theme)}

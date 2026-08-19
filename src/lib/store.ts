@@ -10,6 +10,7 @@ import {
   type NodeChange,
 } from '@xyflow/react'
 import { dirExists, fileExists, interruptSession, readFileHead, sendTurn } from './bridge'
+import { looksLikeQuestion } from './asking'
 import { boxOf, findFreeSpot, layoutCanvas, sizeOf } from './layout'
 import { parsePersonaDefinitions } from './persona-parse'
 import { summarizeTurn } from './summary'
@@ -24,6 +25,7 @@ import {
 import type {
   AgentEvent,
   ContextEntry,
+  Effort,
   FileNodeData,
   FolderNodeData,
   McpNodeData,
@@ -40,7 +42,7 @@ import type {
   SummaryNodeData,
 } from './types'
 
-export type CanvasDialog = 'open' | 'save-as'
+export type CanvasDialog = 'open' | 'save-as' | 'rules'
 
 export type GtNode =
   | (Node<SessionNodeData> & { type: 'session' })
@@ -88,6 +90,11 @@ type State = {
   canvasError: string | null
   /** Which canvas overlay is up, if any. */
   canvasDialog: CanvasDialog | null
+  /**
+   * Rules the user set for this whole canvas. Injected into the opening turn
+   * of every agent spawned on it, orchestrator included.
+   */
+  globalRules: string
 
   /** Personas that outlive the canvas. Loaded from disk at startup. */
   library: Persona[]
@@ -127,6 +134,14 @@ type State = {
    * added or moved stays exactly where they put it.
    */
   autoPlaced: Set<string>
+  /** Messages typed at a session that was mid-turn, waiting their turn. */
+  queued: Record<string, string[]>
+  /**
+   * Sessions whose in-flight turn is being abandoned and re-run, keyed to the
+   * prompt to replay. Set when a setting that only takes effect at turn start
+   * — effort — changes mid-turn.
+   */
+  restarting: Record<string, string>
   /** Hand a node back to the user — called when they drag it. */
   claimNode: (id: string) => void
   toggleAutoTidy: () => void
@@ -136,10 +151,13 @@ type State = {
   renameSession: (nodeId: string, name: string) => void
   setPermission: (nodeId: string, permission: Permission) => void
   setModel: (nodeId: string, model?: string) => void
+  /** Undefined is "unset" — fall back to the provider's own default. */
+  setEffort: (nodeId: string, effort?: Effort) => void
   setRightTab: (t: 'chat' | 'personas') => void
   setChatTarget: (nodeId: string | null) => void
 
   setCanvasDialog: (d: CanvasDialog | null) => void
+  setGlobalRules: (rules: string) => void
 
   send: (nodeId: string, text: string) => Promise<void>
   interrupt: (nodeId: string) => Promise<void>
@@ -149,6 +167,19 @@ type State = {
 // ── helpers ────────────────────────────────────────────────────────────
 
 const isSession = (n: GtNode): n is GtNode & { type: 'session' } => n.type === 'session'
+
+/**
+ * Strip the exchange a restarted turn was in the middle of: the half-written
+ * reply, and the prompt above it that is about to be sent again. Without the
+ * second half you would read your own message twice with a truncated answer
+ * wedged between them.
+ */
+function dropAbandonedTurn(messages: Message[]): Message[] {
+  const out = [...messages]
+  if (out.at(-1)?.role === 'assistant') out.pop()
+  if (out.at(-1)?.role === 'user') out.pop()
+  return out
+}
 const isSkill = (n: GtNode): n is GtNode & { type: 'skill' } => n.type === 'skill'
 const isFolder = (n: GtNode): n is GtNode & { type: 'folder' } => n.type === 'folder'
 const isFile = (n: GtNode): n is GtNode & { type: 'file' } => n.type === 'file'
@@ -181,6 +212,17 @@ export function canvasFilesFor(nodes: GtNode[]): { path: string; name: string }[
   return nodes
     .filter((n): n is GtNode & { type: 'file' } => n.type === 'file')
     .map((n) => ({ path: n.data.path, name: basename(n.data.path) }))
+}
+
+/**
+ * The canvas's rules, as a block to lead an agent's opening turn with.
+ *
+ * Empty rules produce nothing at all: an empty pair of tags reads as an
+ * instruction to follow no rules, which is not what a blank field means.
+ */
+export function globalRulesBlock(rules: string): string {
+  const body = rules.trim()
+  return body ? `<canvas-global-rules>\n${body}\n</canvas-global-rules>` : ''
 }
 
 /** MCP servers wired into a session — what gets passed at spawn. */
@@ -278,6 +320,7 @@ export const useStore = create<State>((set, get) => ({
   canvasDirty: false,
   canvasError: null,
   canvasDialog: null,
+  globalRules: '',
 
   library: [],
   libraryOpen: true,
@@ -285,6 +328,8 @@ export const useStore = create<State>((set, get) => ({
   chatTarget: null,
   autoTidy: true,
   autoPlaced: new Set<string>(),
+  queued: {},
+  restarting: {},
 
   onNodesChange: (changes) =>
     set((s) => ({ nodes: applyNodeChanges(changes, s.nodes) as GtNode[] })),
@@ -342,6 +387,7 @@ export const useStore = create<State>((set, get) => ({
     }),
 
   setCanvasDialog: (canvasDialog) => set({ canvasDialog, canvasError: null }),
+  setGlobalRules: (globalRules) => set({ globalRules }),
 
   setProviders: (providers) => set({ providers }),
   setCwd: (cwd) => set({ cwd }),
@@ -607,6 +653,41 @@ export const useStore = create<State>((set, get) => ({
       ) as GtNode[],
     })),
 
+  /**
+   * Change how hard a session thinks — and if it is thinking right now, make
+   * that count for the answer you are waiting on rather than the one after it.
+   *
+   * Effort is a process argument, fixed when the turn starts, so a mid-turn
+   * change would otherwise be invisible until the next message. Raising it
+   * because the current reply is going badly is exactly when you want it, so
+   * the running turn is stopped and re-run from the same prompt. Permission and
+   * model are deliberately not wired this way: those change what an agent is
+   * allowed to do next, and throwing away completed work to apply them would
+   * cost more than waiting.
+   */
+  setEffort: (nodeId, effort) => {
+    const node = get().nodes.find((n) => n.id === nodeId)
+    if (!node || !isSession(node) || node.data.effort === effort) return
+
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === nodeId && isSession(n) ? { ...n, data: { ...n.data, effort } } : n,
+      ) as GtNode[],
+    }))
+
+    const busy = node.data.state === 'thinking' || node.data.state === 'streaming'
+    if (!busy) return
+
+    // Replay the prompt that started the turn being abandoned, not the last
+    // thing in the transcript — a delegated or queued turn ends with other
+    // traffic.
+    const replay = [...node.data.messages].reverse().find((m) => m.role === 'user')
+    if (replay) {
+      set((s) => ({ restarting: { ...s.restarting, [nodeId]: replay.text } }))
+    }
+    void get().interrupt(nodeId)
+  },
+
   setPermission: (nodeId, permission) =>
     set((s) => ({
       nodes: s.nodes.map((n) =>
@@ -619,7 +700,19 @@ export const useStore = create<State>((set, get) => ({
   send: async (nodeId, text) => {
     const s = get()
     const node = s.nodes.find((n) => n.id === nodeId)
-    if (!node || !isSession(node) || node.data.state === 'thinking') return
+    if (!node || !isSession(node)) return
+
+    // A session is `streaming` for most of a turn, not `thinking`, so guarding
+    // on `thinking` alone let messages through mid-reply — the backend then
+    // refused them and the rejection landed in the transcript as an error.
+    // Typing at a busy agent is reasonable; hold the message and send it when
+    // the turn ends.
+    if (node.data.state === 'thinking' || node.data.state === 'streaming') {
+      set((st) => ({
+        queued: { ...st.queued, [nodeId]: [...(st.queued[nodeId] ?? []), text] },
+      }))
+      return
+    }
     const d = node.data
 
     // 0. The folder node wired into this session is its working directory.
@@ -695,6 +788,14 @@ export const useStore = create<State>((set, get) => ({
     }
 
     const parts: string[] = []
+    // 0. Canvas rules lead the brief, and only on the session's opening turn:
+    // they are captured when the agent is spawned, the same way a persona's
+    // instructions are. Editing them mid-run leaves live sessions on the rules
+    // they started with and applies the new ones to whatever is spawned next.
+    if (!d.providerSessionId) {
+      const rules = globalRulesBlock(s.globalRules)
+      if (rules) parts.push(rules)
+    }
     if (fileBlocks.length) {
       parts.push(fileBlocks.join('\n'))
     }
@@ -769,6 +870,8 @@ export const useStore = create<State>((set, get) => ({
           '- description: when a future orchestrator should reach for this. It is the only thing routing sees, so make it specific.',
           '',
           'A persona you define is saved to the user\'s library and reusable on every canvas, so define it as a lasting role, not a one-off errand. Name it for the role, never for the specific task.',
+          '',
+          'If this turn carries a <canvas-global-rules> block, those rules are the user\'s and they bind you. They also bind everyone you spawn: Canvastrator gives each new agent the same block, and you must restate anything task-specific from it in the SPAWN text you write.',
           '</canvastrator-orchestrator>',
         ].join('\n'),
       )
@@ -796,6 +899,7 @@ export const useStore = create<State>((set, get) => ({
                 ...n.data,
                 cwd,
                 state: 'thinking',
+                awaitingUser: false,
                 turnStartedAt: Date.now(),
                 messages: [...n.data.messages, userMsg, pending],
               },
@@ -914,7 +1018,14 @@ export const useStore = create<State>((set, get) => ({
         break
 
       case 'toolCall':
-        patchPending((m) => ({ ...m, tools: [...m.tools, { name: ev.name, detail: ev.detail }] }))
+        patchPending((m) => ({
+          ...m,
+          tools: [...m.tools, { name: ev.name, detail: ev.detail }],
+          // The model starts a fresh sentence after acting, but the deltas
+          // arrive with no separator — "…orienting in the codebase.Now
+          // writing panels.ts". A tool call is a paragraph break.
+          text: m.text && !/\s$/.test(m.text) ? `${m.text}\n\n` : m.text,
+        }))
         // An MCP call the agent makes shows up on the canvas too — the server
         // it reached for, and the specific tool it used.
         {
@@ -949,6 +1060,34 @@ export const useStore = create<State>((set, get) => ({
         break
 
       case 'exited': {
+        // A turn we stopped on purpose to re-run at a new effort. Its partial
+        // reply is not an answer to anything, so it must not reach the bus, the
+        // canvas, or the spawn/delegate scanners — it gets dropped, along with
+        // the prompt that produced it, and `send` writes both back fresh.
+        const replay = get().restarting[nodeId]
+        if (replay !== undefined) {
+          set((st) => {
+            const { [nodeId]: _dropped, ...rest } = st.restarting
+            return { restarting: rest }
+          })
+          patchNode((d) => ({
+            ...d,
+            state: 'idle',
+            notice: undefined,
+            awaitingUser: false,
+            turnStartedAt: undefined,
+            messages: dropAbandonedTurn(d.messages),
+          }))
+          setTimeout(() => void get().send(nodeId, replay), 0)
+          break
+        }
+
+        // Anything typed while this session was busy goes now, in order.
+        const waiting = get().queued[nodeId] ?? []
+        if (waiting.length) {
+          set((st) => ({ queued: { ...st.queued, [nodeId]: waiting.slice(1) } }))
+          setTimeout(() => void get().send(nodeId, waiting[0]), 0)
+        }
         const finished = findSessionNode(get().nodes, sessionId)
         const last =
           finished && isSession(finished)
@@ -959,6 +1098,8 @@ export const useStore = create<State>((set, get) => ({
           ...d,
           state: d.state === 'error' ? 'error' : 'idle',
           notice: undefined,
+          // A turn that ended on a question is waiting on you, not done.
+          awaitingUser: !!last?.text && !last.error && looksLikeQuestion(last.text),
           // A turn stopped by the user leaves a half-written reply, not an error.
           messages: d.messages
             .filter((m) => !(m.pending && !m.text && !m.tools.length))

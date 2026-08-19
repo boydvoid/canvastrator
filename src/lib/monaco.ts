@@ -8,12 +8,56 @@
  */
 import { loader } from '@monaco-editor/react'
 import * as monaco from 'monaco-editor'
+import {
+  JsxEmit,
+  ModuleKind,
+  ModuleResolutionKind,
+  ScriptTarget,
+  javascriptDefaults,
+  typescriptDefaults,
+} from 'monaco-editor/languages/features/typescript/register'
 import editorWorker from 'monaco-editor/editor/editor.worker.js?worker'
 import cssWorker from 'monaco-editor/language/css/css.worker.js?worker'
 import htmlWorker from 'monaco-editor/language/html/html.worker.js?worker'
 import jsonWorker from 'monaco-editor/language/json/json.worker.js?worker'
 import tsWorker from 'monaco-editor/language/typescript/ts.worker.js?worker'
 import { subscribeTheme, type Theme } from './theme'
+
+/**
+ * Teach the language service what century it is, and stop it type-checking.
+ *
+ * Monaco's standalone TypeScript defaults to an ES5-era config with no project
+ * graph: no tsconfig, no node_modules, no sibling files. So it flags perfectly
+ * good code — top-level `await` is a syntax error at ES5, every `import` path
+ * "cannot be found", and anything a test runner injects (`vi`, `describe`) is
+ * an undefined name.
+ *
+ * The compiler options fix the parsing half. The diagnostics settings switch
+ * off the semantic half entirely, because without the project graph it cannot
+ * be right: every complaint it makes about types or imports is a false one.
+ * Genuine syntax errors still surface — those need no project to detect.
+ */
+for (const defaults of [typescriptDefaults, javascriptDefaults]) {
+  defaults.setCompilerOptions({
+    target: ScriptTarget.ESNext,
+    module: ModuleKind.ESNext,
+    moduleResolution: ModuleResolutionKind.NodeJs,
+    jsx: JsxEmit.ReactJSX,
+    allowJs: true,
+    checkJs: false,
+    esModuleInterop: true,
+    allowSyntheticDefaultImports: true,
+    // The model's path is a real file, not one monaco can resolve.
+    allowNonTsExtensions: true,
+    skipLibCheck: true,
+    noEmit: true,
+  })
+  defaults.setDiagnosticsOptions({
+    noSemanticValidation: true,
+    noSyntaxValidation: false,
+    noSuggestionDiagnostics: true,
+  })
+}
 
 self.MonacoEnvironment = {
   getWorker(_: unknown, label: string) {

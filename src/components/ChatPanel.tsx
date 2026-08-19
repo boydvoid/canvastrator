@@ -13,6 +13,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { canvasFilesFor, resolveCwd, searchRootsFor, useStore, type GtNode } from '@/lib/store'
 import {
+  EFFORTS,
+  EFFORT_HINT,
   PERMISSION_LABEL,
   PROVIDER_ACCENT,
   PROVIDER_LABEL,
@@ -138,6 +140,48 @@ function ModelMenu({ node }: { node: GtNode & { type: 'session' } }) {
 }
 
 /**
+ * Effort for a live session — and the one setting here that acts immediately.
+ *
+ * Changing it mid-turn stops the running turn and re-runs it, so the label says
+ * so before you click: raising effort because a reply is going badly is the
+ * whole reason to reach for this, and silently applying it to the *next* reply
+ * would be the opposite of what was asked for.
+ */
+function EffortMenu({ node }: { node: GtNode & { type: 'session' } }) {
+  const setEffort = useStore((s) => s.setEffort)
+  const d = node.data
+  const busy = d.state === 'thinking' || d.state === 'streaming'
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          className="rounded px-1.5 py-0.5 font-mono text-[10px] text-fg-subtle hover:bg-surface hover:text-fg-muted"
+          title={
+            busy
+              ? 'Reasoning effort — changing it now restarts this turn'
+              : 'Reasoning effort for this session'
+          }
+        >
+          {d.effort ?? 'effort'} ▾
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuLabel>{busy ? 'Effort — restarts this turn' : 'Effort'}</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => setEffort(node.id, undefined)}>
+          default (provider)
+        </DropdownMenuItem>
+        {EFFORTS.map((e) => (
+          <DropdownMenuItem key={e} onSelect={() => setEffort(node.id, e)} title={EFFORT_HINT[e]}>
+            {e}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+/**
  * Chat with any agent on the canvas without hunting for its node.
  *
  * The node transcripts and this one are the same conversation — both read the
@@ -250,6 +294,7 @@ export function ChatPanel() {
         </DropdownMenu>
 
         <ModelMenu node={active} />
+        <EffortMenu node={active} />
 
         <button
           onClick={() =>
@@ -277,7 +322,19 @@ export function ChatPanel() {
 
       {busy && (
         <div className="shrink-0 border-b border-line-soft px-2.5 py-1">
-          <RunningStatus data={d} />
+          <RunningStatus data={d} nodeId={active.id} />
+        </div>
+      )}
+
+      {!busy && d.awaitingUser && (
+        <div
+          className="shrink-0 border-b border-line-soft px-2.5 py-1.5 font-mono text-[10.5px]"
+          style={{
+            background: 'color-mix(in oklch, var(--color-claude) 10%, transparent)',
+            color: 'var(--color-claude)',
+          }}
+        >
+          {d.name} asked you something and is waiting.
         </div>
       )}
 
