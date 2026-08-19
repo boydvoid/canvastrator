@@ -1,0 +1,110 @@
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { PanelLeftOpen } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { CanvasStatus } from '@/components/CanvasBar'
+import { ThemeSwitch } from '@/components/ThemeSwitch'
+import { useStore } from '@/lib/store'
+import { cn } from '@/lib/utils'
+
+/**
+ * The window's own title bar, replaced.
+ *
+ * The native bar is hidden but the traffic lights stay, so everything here is
+ * inset past them. The bar itself is a drag region — with no system title bar,
+ * the window would otherwise be unmovable except by its edges. Anything
+ * interactive has to opt out of that, or clicking a button drags the window.
+ */
+export function AppBar({
+  collapsed,
+  onToggleSidebar,
+  onTidy,
+}: {
+  collapsed: boolean
+  onToggleSidebar: () => void
+  onTidy: () => void
+}) {
+  const nodes = useStore((s) => s.nodes)
+  const bus = useStore((s) => s.bus)
+  const autoTidy = useStore((s) => s.autoTidy)
+  const toggleAutoTidy = useStore((s) => s.toggleAutoTidy)
+
+  const folders = nodes.filter((n) => n.type === 'folder').length
+  const sessions = nodes.filter((n) => n.type === 'session').length
+  const totalCost = nodes.reduce(
+    (acc, n) => acc + (n.type === 'session' ? n.data.usage.costUsd : 0),
+    0,
+  )
+
+  return (
+    <header
+      data-tauri-drag-region
+      // Double-click zooms, the way a real title bar does.
+      onDoubleClick={(e) => {
+        if ((e.target as HTMLElement).closest('button,input,a')) return
+        void getCurrentWindow().toggleMaximize().catch(() => {})
+      }}
+      // Left padding clears the traffic lights; the bar is the drag handle.
+      //
+      // Every non-interactive child carries the attribute too: the region is
+      // matched against the element actually under the pointer, so a bare
+      // <span> on top of the header swallows the drag.
+      className="flex h-11 shrink-0 items-center gap-2.5 pr-3 pl-[86px] select-none"
+    >
+      {collapsed && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6"
+          title="Show sidebar  ⌘\"
+          onClick={onToggleSidebar}
+        >
+          <PanelLeftOpen size={13} />
+        </Button>
+      )}
+
+      <span className="font-mono text-[12.5px] tracking-tight text-fg" data-tauri-drag-region>
+        canvas<span className="text-fg-muted">trator</span>
+      </span>
+
+      <span data-tauri-drag-region className="flex items-center">
+        <CanvasStatus />
+      </span>
+
+      <span className="font-mono text-[11px] text-fg-muted" data-tauri-drag-region>
+        {folders === 0 ? 'no folder yet' : `${folders} folder${folders > 1 ? 's' : ''}`}
+      </span>
+
+      <div data-tauri-drag-region className="ml-auto flex items-center gap-2.5">
+        <button
+          onClick={onTidy}
+          className="rounded px-1.5 py-0.5 font-mono text-[11px] text-fg-muted hover:bg-surface hover:text-fg"
+          title="Tidy the canvas  ⇧⌘L"
+        >
+          tidy
+        </button>
+        <button
+          onClick={toggleAutoTidy}
+          className={cn(
+            'rounded px-1.5 py-0.5 font-mono text-[11px] hover:bg-surface hover:text-fg',
+            autoTidy ? 'text-fg' : 'text-fg-muted',
+          )}
+          title={
+            autoTidy
+              ? 'Auto-layout is on: agent-placed nodes re-tidy as they appear. Click to turn off.'
+              : 'Auto-layout is off. Click to turn on.'
+          }
+        >
+          auto {autoTidy ? 'on' : 'off'}
+        </button>
+        <ThemeSwitch />
+        <span
+          className="font-mono text-[11px] text-fg-muted tabular-nums"
+          data-tauri-drag-region
+        >
+          {sessions} sessions · {bus.length} ctx
+          {totalCost > 0 && ` · $${totalCost.toFixed(3)}`}
+        </span>
+      </div>
+    </header>
+  )
+}

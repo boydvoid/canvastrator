@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024"
+     role="img" aria-label="Canvastrator">
+  <!--
+    Monochrome / template variant of icon.svg: no container, single flat fill,
+    transparent ground. This is the one to use for a macOS menu-bar (tray)
+    item, where the OS tints a template image itself and a filled dark square
+    would read as a black blob.
+
+    The mark is scaled to fill the canvas more generously than in icon.svg
+    (no container to sit inside): painted bounds 4..28 on the 32 grid, scaled
+    36x and centred, giving an 864 painted figure with an 80 margin.
+  -->
+  <g transform="translate(-64 -64) scale(36)" fill="currentColor">
+    <!-- top arm -->
+    <rect x="9" y="4" width="4" height="4" rx="1" />
+    <rect x="14" y="4" width="4" height="4" rx="1" />
+    <rect x="19" y="4" width="4" height="4" rx="1" />
+    <rect x="24" y="4" width="4" height="4" rx="1" />
+    <!-- stem -->
+    <rect x="4" y="9" width="4" height="4" rx="1" />
+    <rect x="4" y="14" width="4" height="4" rx="1" />
+    <rect x="4" y="19" width="4" height="4" rx="1" />
+    <!-- bottom arm -->
+    <rect x="9" y="24" width="4" height="4" rx="1" />
+    <rect x="14" y="24" width="4" height="4" rx="1" />
+    <rect x="19" y="24" width="4" height="4" rx="1" />
+    <rect x="24" y="24" width="4" height="4" rx="1" />
+  </g>
+</svg>

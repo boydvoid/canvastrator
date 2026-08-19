@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"
+     role="img" aria-label="Canvastrator">
+  <!--
+    Canvastrator favicon — 32 x 32, designed to survive 16px.
+
+    Same geometry as logo.svg, unaltered: the 5x5 cell field with eleven cells
+    present, pitch 5 / module 4 / gutter 1, painted 4..28. Deliberately NOT
+    logo.svg dropped inside a container — at 16px a container eats half the
+    pixels. The mark already carries its own 4-unit margin, so it runs at its
+    native size here.
+
+    Nothing needed simplifying for the small size. The mark is flat fills with
+    no stroke, so there are no caps or joins to bloom, and the 1-unit gutters
+    are meant to anti-alias shut at 16px: the tab icon is a solid C, the same
+    C the 32px and 128px renders show with its grid open. Verified by
+    rasterising at 16/20/24/32 and inspecting the pixels, not by eye at 128.
+
+    COLOUR — note the belt and braces. The ink-950 default is set with an
+    ordinary presentation ATTRIBUTE so that renderers with no CSS support
+    (Quick Look, some icon rasterisers, older toolchains) still draw the mark;
+    styling it from the <style> block alone renders an empty file in those.
+    The media query then overrides to ink-100 for dark browser chrome — a
+    class selector outranks a presentation attribute, so the override wins
+    wherever CSS is understood, and the dark-on-light default is the safe
+    fallback everywhere else.
+  -->
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .gt { fill: #e6e8eb; }
+    }
+  </style>
+  <g class="gt" fill="#090b0f">
+    <!-- top arm -->
+    <rect x="9" y="4" width="4" height="4" rx="1" />
+    <rect x="14" y="4" width="4" height="4" rx="1" />
+    <rect x="19" y="4" width="4" height="4" rx="1" />
+    <rect x="24" y="4" width="4" height="4" rx="1" />
+    <!-- stem -->
+    <rect x="4" y="9" width="4" height="4" rx="1" />
+    <rect x="4" y="14" width="4" height="4" rx="1" />
+    <rect x="4" y="19" width="4" height="4" rx="1" />
+    <!-- bottom arm -->
+    <rect x="9" y="24" width="4" height="4" rx="1" />
+    <rect x="14" y="24" width="4" height="4" rx="1" />
+    <rect x="19" y="24" width="4" height="4" rx="1" />
+    <rect x="24" y="24" width="4" height="4" rx="1" />
+  </g>
+</svg>

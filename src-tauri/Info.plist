@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    macOS denies a TCC-gated operation outright when the matching usage
+    description is missing — it doesn't prompt, it fails. Agents spawned by
+    Canvastrator inherit its identity, so every permission they need has to be
+    declared here or their work is blocked with no explanation.
+  -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Agents you run in Canvastrator may drive other apps — for example a browser, when using a Playwright or browser-automation tool.</string>
+
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Agents read and write files in the project folders you attach to the canvas.</string>
+
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Agents read and write files in the project folders you attach to the canvas.</string>
+
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Agents read and write files in the project folders you attach to the canvas.</string>
+
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>Needed only if you attach a project folder that lives on an external drive.</string>
+
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>Needed only if you attach a project folder that lives on a network share.</string>
+</dict>
+</plist>

@@ -1,0 +1,295 @@
+@import 'tailwindcss';
+@import '@xyflow/react/dist/style.css';
+
+/* Self-hosted, not CDN: a desktop app must render text offline. Fontsource
+   ships the woff2 files, so Vite bundles them with everything else. */
+@import '@fontsource-variable/jetbrains-mono';
+@import '@fontsource-variable/outfit';
+@import '@fontsource-variable/roboto-slab';
+
+@theme {
+  /* Mono carries the machine: paths, code, metrics, status. JetBrains Mono has
+     a tall x-height and unambiguous 0/O and 1/l/I, which matters at 10-11px. */
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+  /* Sans carries the interface and the prose agents write back. */
+  --font-sans: 'Outfit Variable', ui-sans-serif, -apple-system, system-ui, sans-serif;
+  /* Slab carries headings — enough contrast against Outfit to structure a long
+     reply without another weight or colour. */
+  --font-slab: 'Roboto Slab Variable', ui-serif, Georgia, serif;
+
+  /* ── Colour ───────────────────────────────────────────────────────────
+     Every colour in the app comes from this block. Nothing else names a
+     hue: components use the semantic token for the job (`bg-surface`,
+     `text-fg-faint`), never a raw ramp step, so a second palette is a
+     matter of re-pointing these variables and nothing else.
+
+     The values here are the dark theme, and dark is the default — a token
+     with no light override simply keeps its dark value. The light theme
+     lives in the [data-theme='light'] block below. */
+
+  /* Surfaces, from furthest back to nearest front. */
+  --color-canvas: oklch(0.165 0.008 265);
+  --color-panel: oklch(0.215 0.009 265);
+  --color-surface: oklch(0.25 0.010 265);
+  --color-surface-2: oklch(0.295 0.011 265);
+  --color-surface-3: oklch(0.365 0.012 265);
+
+  /* Hairlines, from quietest to loudest. */
+  --color-line-soft: oklch(0.25 0.010 265);
+  --color-line: oklch(0.315 0.011 265);
+  --color-line-strong: oklch(0.40 0.012 265);
+  --color-line-strongest: oklch(0.55 0.014 265);
+
+  /* Text, from most emphatic to most incidental. */
+  --color-fg-strong: oklch(1 0 0);
+  --color-fg: oklch(0.93 0.005 265);
+  --color-fg-muted: oklch(0.74 0.010 265);
+  --color-fg-subtle: oklch(0.55 0.014 265);
+  --color-fg-faint: oklch(0.50 0.012 265);
+
+  /* Connector lines on the canvas. Edges carrying a provider's traffic take
+     that provider's accent instead; these are the unattributed ones. */
+  --color-edge-strong: oklch(0.74 0.010 265);
+  --color-edge: oklch(0.46 0.012 265);
+  --color-edge-muted: oklch(0.58 0.014 265);
+
+  /* Overlays on the vibrant sidebar, which has no opaque surface of its own
+     to tint — these ride on whatever the desktop shows through. */
+  --color-veil-strong: oklch(1 0 0 / 12%);
+  --color-veil-soft: oklch(1 0 0 / 6%);
+  --color-veil-line: oklch(1 0 0 / 8%);
+
+  /* One accent per provider. Used on node border, glyph, and outgoing edges.
+     A running agent is drawn in its provider's accent — that is the running
+     status colour, so the canvas says who is working, not just that someone
+     is. Chosen to read warm against the cold near-black above. */
+  --color-claude: oklch(0.72 0.14 55);
+  --color-codex: oklch(0.78 0.15 165);
+  --color-opencode: oklch(0.70 0.16 295);
+
+  /* Terminal states: `live` is a turn that landed — written file, connected
+     server, saved canvas — and `danger` is one that failed. */
+  --color-live: oklch(0.80 0.17 145);
+  --color-danger: oklch(0.65 0.20 25);
+}
+
+/* ── Light theme ──────────────────────────────────────────────────────────
+   The same roles, re-pointed. Surfaces invert (the canvas recedes to a warm
+   grey so white node surfaces sit *above* it, exactly as they do in dark),
+   and every accent is darkened until it carries as text.
+
+   Text tokens are picked for WCAG AA against the surfaces they land on —
+   `src/lib/theme.test.ts` parses this block and fails the build if any of
+   them drops below 4.5:1. */
+html[data-theme='light'] {
+  --color-canvas: oklch(0.965 0.004 265);
+  --color-panel: oklch(0.985 0.003 265);
+  --color-surface: oklch(1 0 0);
+  --color-surface-2: oklch(0.945 0.005 265);
+  --color-surface-3: oklch(0.90 0.006 265);
+
+  --color-line-soft: oklch(0.925 0.005 265);
+  --color-line: oklch(0.885 0.006 265);
+  --color-line-strong: oklch(0.82 0.008 265);
+  --color-line-strongest: oklch(0.70 0.010 265);
+
+  --color-fg-strong: oklch(0.15 0.010 265);
+  --color-fg: oklch(0.24 0.010 265);
+  --color-fg-muted: oklch(0.38 0.012 265);
+  --color-fg-subtle: oklch(0.48 0.014 265);
+  --color-fg-faint: oklch(0.525 0.014 265);
+
+  /* Darker than their dark-theme counterparts: a hairline that reads on
+     near-black disappears on near-white. */
+  --color-edge-strong: oklch(0.45 0.012 265);
+  --color-edge: oklch(0.62 0.012 265);
+  --color-edge-muted: oklch(0.74 0.012 265);
+
+  /* Black veils, and thinner: the same alpha in black is far heavier than
+     in white. */
+  --color-veil-strong: oklch(0 0 0 / 8%);
+  --color-veil-soft: oklch(0 0 0 / 4%);
+  --color-veil-line: oklch(0 0 0 / 10%);
+
+  --color-claude: oklch(0.53 0.15 55);
+  --color-codex: oklch(0.485 0.12 165);
+  --color-opencode: oklch(0.49 0.19 295);
+
+  --color-live: oklch(0.50 0.15 145);
+  /* Darker than the other accents on purpose: danger is the one colour drawn
+     as text on a tint of itself, and a 20% wash eats contrast. */
+  --color-danger: oklch(0.47 0.20 25);
+}
+
+html[data-theme='dark'] {
+  color-scheme: dark;
+}
+html[data-theme='light'] {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* Transparent so the window's native macOS vibrancy shows through the
+     sidebar. Everything that isn't the sidebar paints its own opaque
+     background, so this is only ever visible behind translucent chrome. */
+  background: transparent;
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ── Sidebar ────────────────────────────────────────────────────────────
+   The native NSVisualEffectView sits behind the whole window; this is the
+   tint on top of it, the same trick Finder and Mail use. In a plain browser
+   (bun run dev) there's no vibrancy to sample, so the blur is the fallback
+   and the panel still reads as a translucent surface. */
+.gt-sidebar {
+  background: color-mix(in oklch, var(--color-panel) 55%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+}
+
+/* ── React Flow surface ─────────────────────────────────────────────── */
+
+.react-flow {
+  --xy-background-color: var(--color-canvas);
+}
+.react-flow__node {
+  cursor: default;
+}
+/* Session nodes saved before they carried a size: without this they'd size to
+   their transcript and grow without limit. React Flow writes width/height
+   inline once a node has been resized, which overrides this. */
+.react-flow__node-session {
+  width: 400px;
+  height: 340px;
+}
+.react-flow__handle {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--color-line-strong);
+  background: var(--color-panel);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.react-flow__handle:hover {
+  border-color: var(--color-fg-muted);
+  background: var(--color-surface-3);
+}
+.react-flow__attribution {
+  display: none;
+}
+
+/* ── Motion. Each of these encodes one specific state. ──────────────── */
+
+/* Agent is thinking: the node's own border breathes in its provider accent. */
+@keyframes gt-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px var(--accent-dim), 0 0 20px -6px var(--accent-dim);
+  }
+  50% {
+    box-shadow: 0 0 0 1px var(--accent), 0 0 30px -4px var(--accent);
+  }
+}
+.gt-thinking {
+  animation: gt-breathe 1.9s ease-in-out infinite;
+}
+
+/* Context moving along an edge: dashes travel source → target. */
+@keyframes gt-flow {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+.gt-edge-flowing {
+  stroke-dasharray: 5 6;
+  animation: gt-flow 0.7s linear infinite;
+}
+
+/* A live agent→agent call: faster, brighter, and it doesn't persist. */
+@keyframes gt-call {
+  to {
+    stroke-dashoffset: -30;
+  }
+}
+.gt-edge-calling {
+  stroke-dasharray: 2 7;
+  animation: gt-call 0.45s linear infinite;
+}
+
+/* Streaming text: caret at the tail of the transcript. */
+@keyframes gt-caret {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  50%,
+  95% {
+    opacity: 0.15;
+  }
+}
+.gt-caret {
+  animation: gt-caret 1.1s steps(1) infinite;
+}
+
+/* A node entering the canvas. */
+@keyframes gt-spawn {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.gt-spawn {
+  animation: gt-spawn 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* A skill firing on its session. */
+@keyframes gt-pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 12px transparent;
+  }
+}
+.gt-firing {
+  animation: gt-pulse-ring 700ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gt-thinking,
+  .gt-edge-flowing,
+  .gt-edge-calling,
+  .gt-caret,
+  .gt-spawn,
+  .gt-firing {
+    animation: none !important;
+  }
+  /* Motion carried state; without it the state still has to be legible. */
+  .gt-thinking {
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .gt-edge-flowing,
+  .gt-edge-calling {
+    stroke-dasharray: 4 4;
+  }
+}
+
+/* Thin scrollbars inside transcripts */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}

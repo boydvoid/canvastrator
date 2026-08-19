@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024"
+     role="img" aria-label="Canvastrator">
+  <!--
+    Canvastrator app icon — source for `tauri icon`.
+
+    macOS optical grid: the 1024 canvas is the full bleed, the icon body is the
+    824 x 824 rounded square inset 100 on every side, corner radius 185. That
+    is Apple's published proportion, so Canvastrator sits at the same visual size
+    as system apps in the Dock and Launchpad rather than looking oversized.
+
+    The mark is logo.svg unaltered, scaled 20x and centred: its painted bounds
+    are 4..28 on a 32 grid, so translate(192 192) scale(20) puts the painted
+    480 x 480 figure exactly on the 512 centre. 480/824 = 58% of the body —
+    the standard optical fill for a geometric mark in a filled container.
+    In this space each cell module is 80 wide on a 100 pitch, so the canvas
+    gutters are 20 — at the 128px Dock size that is 2.5px, still legible, and
+    at 1024 in the App Store the grid is unmistakable.
+
+    CONTAINER CONTRAST — the body is ink-900, not ink-950, and carries an
+    8-unit inset rim in ink-800. Filling it with ink-950 (the app's own
+    backdrop) was tested first and the icon lost its silhouette against a
+    black Dock or a dark wallpaper: the body edge and the ground were the same
+    value. Lifting the body one step and adding the rim gives the shape a
+    self-contained edge on any wallpaper, without a gradient, bevel or shadow.
+    The rim is drawn inset by half its own width so it sits fully inside the
+    824 body and never bleeds past the corner radius.
+
+    Flat fills only — the icon reads at 16px in the menu bar and at 1024 in
+    the App Store from the same geometry.
+  -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#121418" />
+  <rect x="104" y="104" width="816" height="816" rx="181" ry="181"
+        fill="none" stroke="#21242a" stroke-width="8" />
+  <g transform="translate(192 192) scale(20)" fill="#e6e8eb">
+    <!-- top arm -->
+    <rect x="9" y="4" width="4" height="4" rx="1" />
+    <rect x="14" y="4" width="4" height="4" rx="1" />
+    <rect x="19" y="4" width="4" height="4" rx="1" />
+    <rect x="24" y="4" width="4" height="4" rx="1" />
+    <!-- stem -->
+    <rect x="4" y="9" width="4" height="4" rx="1" />
+    <rect x="4" y="14" width="4" height="4" rx="1" />
+    <rect x="4" y="19" width="4" height="4" rx="1" />
+    <!-- bottom arm -->
+    <rect x="9" y="24" width="4" height="4" rx="1" />
+    <rect x="14" y="24" width="4" height="4" rx="1" />
+    <rect x="19" y="24" width="4" height="4" rx="1" />
+    <rect x="24" y="24" width="4" height="4" rx="1" />
+  </g>
+</svg>

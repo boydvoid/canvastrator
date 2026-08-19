@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Canvastrator</title>
+    <script>
+      // Before the bundle loads, so the first frame is already the right
+      // theme — a dark app flashing white on launch is worse than no light
+      // theme at all. Kept in sync with src/lib/theme.ts by hand: it is the
+      // same two assignments, and it has to run without any imports.
+      ;(function () {
+        var theme = 'dark'
+        try {
+          var pref = localStorage.getItem('canvastrator.theme')
+          if (pref === 'light') theme = 'light'
+          else if (pref === 'system')
+            theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+        } catch (e) {
+          /* no storage — dark, the default */
+        }
+        document.documentElement.dataset.theme = theme
+        document.documentElement.style.colorScheme = theme
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"
+     role="img" aria-label="Canvastrator"
+     fill="currentColor">
+  <!--
+    Canvastrator mark — "the C is the canvas".
+    A 5x5 field of canvas cells. Eleven are occupied and those eleven ARE the
+    letter: there is no C drawn and no grid drawn behind it, only cells that
+    are present and cells that are absent. That is the product — agents are
+    slots on a canvas, and the arrangement is the meaning.
+
+    Grid: 32 units. Pitch 5, module 4, gutter 1, origin 4.
+      column/row origins  4, 9, 14, 19, 24
+      module spans        4-8, 9-13, 14-18, 19-23, 24-28
+    Painted bounds 4..28 in both axes — a 24-unit mark in a 32-unit box, the
+    same envelope the previous mark used, so the wordmark lockup and the
+    icon.svg transform take it without re-spacing.
+
+    Occupancy (. absent, X present):
+      . X X X X
+      X . . . .
+      X . . . .
+      X . . . .
+      . X X X X
+    The two left corner cells are absent on purpose. Dropping them puts a
+    diagonal step at each left corner, which is what turns a square bracket
+    into a letter — a full-width bar reads as `[`, this reads as `C`. The
+    right side is open across three whole cells (16 of the 24 units), so the
+    aperture can never close up into an `O` at small sizes. A one-cell
+    aperture was drawn first and tested: at 16px it reads as a ring, not a C.
+
+    WHY 4-AND-1 AND NOT 4-AND-2. The gutter is deliberately narrower than a
+    device pixel at the smallest size. At 16px one unit is 0.5px, so the
+    gutters anti-alias away and the mark resolves to a solid, unambiguous C;
+    at 32px they are exactly 1px and the grid snaps into view; at 128px they
+    are 4px and the construction is plain. The silhouette is what has to stay
+    crisp, and it does — the outer bounds, 4 and 28, are whole pixels at every
+    power-of-two size. The grid detail is the part that is allowed to fade.
+
+    Flat fill, one colour, no stroke — nothing to scale wrong in .ico/.icns.
+    Colour is inherited. See the currentColor caveat in README.md — this file
+    only picks up `color` when it is inlined in the DOM or used as a mask.
+  -->
+  <!-- top arm -->
+  <rect x="9" y="4" width="4" height="4" rx="1" />
+  <rect x="14" y="4" width="4" height="4" rx="1" />
+  <rect x="19" y="4" width="4" height="4" rx="1" />
+  <rect x="24" y="4" width="4" height="4" rx="1" />
+  <!-- stem -->
+  <rect x="4" y="9" width="4" height="4" rx="1" />
+  <rect x="4" y="14" width="4" height="4" rx="1" />
+  <rect x="4" y="19" width="4" height="4" rx="1" />
+  <!-- bottom arm -->
+  <rect x="9" y="24" width="4" height="4" rx="1" />
+  <rect x="14" y="24" width="4" height="4" rx="1" />
+  <rect x="19" y="24" width="4" height="4" rx="1" />
+  <rect x="24" y="24" width="4" height="4" rx="1" />
+</svg>

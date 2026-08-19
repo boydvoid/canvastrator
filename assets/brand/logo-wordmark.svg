@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 156 32"
+     role="img" aria-label="Canvastrator"
+     fill="none" stroke="#e6e8eb" stroke-width="2" stroke-linecap="square" stroke-linejoin="round">
+  <!--
+    Canvastrator horizontal lockup: mark + wordmark + cursor block. 152 x 32.
+
+    The lettering is pure geometry — no font is referenced and no text is set,
+    so this file rasterises identically on any machine. Every letter is built
+    from straight segments and exact circular/elliptical arcs whose endpoints
+    land on the axis extremes of their own circle, so no arc radius is ever
+    auto-scaled by the renderer.
+
+    Metrics, in viewBox units (PATH coords; the 2-wide stroke adds 1 all round,
+    so the PAINTED figure is the +/-1 envelope quoted after each):
+      baseline      y = 22            painted foot  y = 23
+      cap height    y = 10 .. 22      painted  9 .. 23   (G, T, d ascender)
+      x-height      y = 14 .. 22      painted 13 .. 23   (r, i, e, m)
+      glyph box     10 painted wide, advance 14 — a fixed pitch, like the
+                    monospace the app is a client for
+    Layout:
+      mark        painted   0 ..  24   (logo.svg, shifted so its edge sits on 0)
+      clear space          24 ..  32   (8 units = one cell — the clear-space rule)
+      wordmark             32 .. 140   (8 glyphs at 14 pitch)
+      space               140 .. 148   (a full cell, so the block does not fuse with m)
+      cursor              148 .. 156
+  -->
+
+  <!-- The mark, shifted so its painted edge sits on x = 0. Fills, not
+       strokes, so it overrides the lockup's stroke defaults locally. -->
+  <g transform="translate(-4 0)" fill="#e6e8eb" stroke="none">
+    <!-- top arm -->
+    <rect x="9" y="4" width="4" height="4" rx="1" />
+    <rect x="14" y="4" width="4" height="4" rx="1" />
+    <rect x="19" y="4" width="4" height="4" rx="1" />
+    <rect x="24" y="4" width="4" height="4" rx="1" />
+    <!-- stem -->
+    <rect x="4" y="9" width="4" height="4" rx="1" />
+    <rect x="4" y="14" width="4" height="4" rx="1" />
+    <rect x="4" y="19" width="4" height="4" rx="1" />
+    <!-- bottom arm -->
+    <rect x="9" y="24" width="4" height="4" rx="1" />
+    <rect x="14" y="24" width="4" height="4" rx="1" />
+    <rect x="19" y="24" width="4" height="4" rx="1" />
+    <rect x="24" y="24" width="4" height="4" rx="1" />
+  </g>
+
+  <!-- G — ellipse rx4 ry6 about (5,16), flat shoulder, bar to centre. -->
+  <g transform="translate(32 0)">
+    <path d="M9 10 H5 A4 6 0 0 0 5 22 A4 6 0 0 0 9 16 H6" />
+  </g>
+  <!-- r — stem plus an exact quarter arc r3 about (4,17). -->
+  <g transform="translate(46 0)">
+    <path d="M1 22 V17 A3 3 0 0 1 4 14 H8" />
+  </g>
+  <!-- i — bare stem and a square dot; the dot clears the x-height by one unit. -->
+  <g transform="translate(60 0)">
+    <path d="M5 22 V14" />
+    <rect x="4" y="10" width="2" height="2" fill="#e6e8eb" stroke="none" />
+  </g>
+  <!-- d — ascender stem at the box edge plus a half-ellipse bowl rx8 ry4 about
+       (9,18). NOTE rx is 8, not 4: the chord (9,14)-(9,22) is the ry-diameter,
+       so rx alone sets how far left the bowl reaches — here to x=1, filling the
+       box. An rx of 4 collapses the bowl to half width and the d reads as ol. -->
+  <g transform="translate(74 0)">
+    <path d="M9 10 V22" />
+    <path d="M9 14 A8 4 0 1 0 9 22" />
+  </g>
+  <!-- T -->
+  <g transform="translate(88 0)">
+    <path d="M1 10 H9" />
+    <path d="M5 10 V22" />
+  </g>
+  <!-- e — crossbar plus three quarters of a circle r4 about (5,18), flat exit. -->
+  <g transform="translate(102 0)">
+    <path d="M1 18 H9" />
+    <path d="M9 18 A4 4 0 1 0 5 22 H7" />
+  </g>
+  <!-- r -->
+  <g transform="translate(116 0)">
+    <path d="M1 22 V17 A3 3 0 0 1 4 14 H8" />
+  </g>
+  <!-- m — two exact half-ellipses rx2 ry4, apexes on the x-height. -->
+  <g transform="translate(130 0)">
+    <path d="M1 22 V18 A2 4 0 0 1 5 18 V22" />
+    <path d="M5 18 A2 4 0 0 1 9 18 V22" />
+  </g>
+
+  <!-- Terminal cursor, parked one space after the word, cap height exactly. -->
+  <rect x="148" y="9" width="8" height="14" fill="#e6e8eb" stroke="none" />
+</svg>
