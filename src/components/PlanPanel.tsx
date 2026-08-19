@@ -133,7 +133,11 @@ export function PlanPanel({ plan }: { plan: Plan }) {
               at all — and those are the ones still waiting to be approved.
               Capped rather than flexed because the panel sits in a column of
               shrink-0 siblings: a share of the viewport is the only height it
-              can know here, and it leaves the transcript the majority. */}
+              can know here, and it leaves the transcript the majority.
+
+              Three tenths, not four: in the central chatbox this panel shares
+              a bounded box with the transcript and the composer, and at 40vh a
+              long plan left the conversation a sliver. */}
           {/* The shape it chose, and why — shown where the plan is approved,
               because that is the decision being approved. A list of steps
               hides the difference between "these four run one after another"
@@ -166,7 +170,7 @@ export function PlanPanel({ plan }: { plan: Plan }) {
             </p>
           )}
 
-          <ol className="max-h-[40vh] space-y-1 overflow-y-auto overscroll-contain">
+          <ol className="max-h-[30vh] space-y-1 overflow-y-auto overscroll-contain">
             {plan.steps.map((step, i) => (
               <Step key={step.id} step={step} index={i} busy={busy} />
             ))}

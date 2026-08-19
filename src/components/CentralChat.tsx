@@ -250,7 +250,12 @@ export function CentralChat() {
     // Typing to an agent must never trip a canvas shortcut.
     <div
       data-shortcuts="off"
-      className="pointer-events-auto absolute bottom-4 left-1/2 z-20 flex w-[min(46rem,calc(100%-3rem))] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-xl backdrop-blur"
+      // Capped to the canvas it floats over. Anchored at the bottom, the box
+      // grows *upward* as the plan and the transcript fill it — and with no
+      // ceiling it grew straight past the top of the canvas, which clips it.
+      // Everything above that edge was then unreachable: not scrolled to, not
+      // clickable, and the plan waiting to be approved is what sits up there.
+      className="pointer-events-auto absolute bottom-4 left-1/2 z-20 flex max-h-[calc(100%-2rem)] w-[min(46rem,calc(100%-3rem))] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-xl backdrop-blur"
     >
       {/* who you're talking to */}
       <div className="flex shrink-0 items-center gap-1.5 border-b border-line-soft px-2.5 py-1.5">
@@ -367,11 +372,15 @@ export function CentralChat() {
 
       {/* transcript */}
       {open && (
-        <div className="relative min-h-0">
+        // The transcript is what gives when the box runs out of room. Every
+        // other section is `shrink-0` on purpose — a half-drawn composer or a
+        // clipped plan step is useless, while a shorter transcript is merely a
+        // shorter transcript, and it scrolls.
+        <div className="relative flex min-h-0 flex-col">
           <div
             ref={scrollRef}
             onScroll={onScroll}
-            className="max-h-[42vh] space-y-3 overflow-y-auto px-3 py-3"
+            className="max-h-[42vh] min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
           >
             {d.messages.length === 0 && (
               <p className="py-6 text-center font-mono text-[11px] text-fg-faint">

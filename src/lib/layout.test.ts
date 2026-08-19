@@ -35,6 +35,40 @@ function assertNoOverlaps(nodes: GtNode[], placed: Record<string, { x: number; y
 }
 
 describe('layoutCanvas', () => {
+  /**
+   * The bug this pins: the layout worked in a coordinate space of its own,
+   * starting at the origin, while a node the user placed kept its real
+   * position. The orchestrator is the one agent the user creates by hand, so
+   * in practice every canvas hit this — children were laid out correctly
+   * relative to each other and then drawn hundreds of pixels away at the
+   * top-left, with their edges looping backwards to the parent.
+   */
+  it('lays the tree out from where the user put the orchestrator, not from the origin', () => {
+    const nodes = [session('boss', 900, 400), session('kid1'), session('kid2')]
+    const edges = [edge('boss', 'kid1', 'spawn'), edge('boss', 'kid2', 'spawn')]
+    // Only the spawned agents are the layout's to move — the user placed the
+    // orchestrator, which is exactly the case that used to break.
+    const p = layoutCanvas(nodes, edges, new Set(['kid1', 'kid2']))
+
+    // The user's node stays put, and the flow still reads left to right.
+    expect(p.boss).toBeUndefined()
+    expect(p.kid1.x).toBeGreaterThan(900)
+    expect(p.kid2.x).toBeGreaterThan(900)
+    // Beside it, not off at the top of the canvas.
+    expect(Math.abs(p.kid1.y - 400)).toBeLessThan(400)
+    assertNoOverlaps(nodes, p)
+  })
+
+  it('anchors on the agent nearest the root when several are fixed', () => {
+    const nodes = [session('boss', 900, 400), session('kid', 5000, 2000), session('grandkid')]
+    const edges = [edge('boss', 'kid', 'spawn'), edge('kid', 'grandkid', 'spawn')]
+    const p = layoutCanvas(nodes, edges, new Set(['grandkid']))
+    // Anchored on `boss`, so the third generation lands to the right of the
+    // orchestrator rather than being dragged out to the stray middle node.
+    expect(p.grandkid.x).toBeGreaterThan(900)
+    expect(p.grandkid.x).toBeLessThan(5000)
+  })
+
   it('puts a folder in front of its session and the files after it', () => {
     const nodes = [session('s1'), folder('f1'), file('a'), file('b')]
     const edges = [

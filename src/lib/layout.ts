@@ -402,6 +402,36 @@ export function layoutCanvas(
       LEVEL_GAP_X
   }
 
+  // ── anchored to whatever the user already placed ──────────────────────
+  //
+  // Everything above is in a coordinate space of its own, starting at the
+  // origin. That is right when the layout owns the whole canvas, and wrong the
+  // moment it does not: the orchestrator is the one agent the *user* creates,
+  // so it is almost always fixed, and its spawned children were being laid out
+  // hundreds of pixels away at the top-left of the canvas with their edges
+  // looping back to it. The tree was correct and unreadable — a flow that
+  // reads right to left because one end of it never moved.
+  //
+  // So the computed space is translated onto the fixed agent nearest the root.
+  // Its own strip already arranges around where it really is; this puts every
+  // generation the layout *does* own into the same frame, to its right.
+  // Nearest the root because that is the agent the flow reads from — anchoring
+  // on a fixed leaf would push its ancestors off to the left of it, which is
+  // the same backwards flow in a subtler form.
+  let dx = 0
+  let dy = 0
+  const anchor = sessions
+    .filter((s) => !owns(s.id) && g.hasNode(s.id))
+    .sort((a, b) => (laidX.get(a.id) ?? 0) - (laidX.get(b.id) ?? 0))[0]
+  if (anchor) {
+    const laid = g.node(anchor.id) as { y: number } | undefined
+    const block = blocks.get(anchor.id)
+    if (laid && block) {
+      dx = anchor.position.x - (laidX.get(anchor.id) ?? 0)
+      dy = anchor.position.y - Math.round(laid.y - block.own.h / 2)
+    }
+  }
+
   // ── the contents of each strip ────────────────────────────────────────
   for (const s of sessions) {
     const block = blocks.get(s.id)!
@@ -413,8 +443,8 @@ export function layoutCanvas(
     // A session the user placed anchors its own strip: dagre's idea of where
     // the strip belongs is only used for the ones the layout owns.
     const fixed = !owns(s.id)
-    const sx = fixed ? s.position.x : Math.round(laidX.get(s.id) ?? laid.x - block.own.w / 2)
-    const sy = fixed ? s.position.y : Math.round(laid.y - block.own.h / 2)
+    const sx = fixed ? s.position.x : Math.round((laidX.get(s.id) ?? laid.x - block.own.w / 2) + dx)
+    const sy = fixed ? s.position.y : Math.round(laid.y - block.own.h / 2 + dy)
     // Everything in the strip lines up on the session's own centre line, so a
     // support, its session and the files it produced all read as one row.
     const cy = sy + block.own.h / 2
@@ -513,8 +543,14 @@ export function layoutCanvas(
   }, 0)
 
   // Unattached nodes park in a row underneath, rather than being left where
-  // they happened to land.
-  let ox = 0
+  // they happened to land. Underneath *the flow* — starting at its left edge
+  // rather than at the origin, which on an anchored canvas is somewhere off to
+  // the side with nothing else near it.
+  let ox = Object.entries(out).reduce(
+    (left, [id, p]) => (byId.has(id) ? Math.min(left, p.x) : left),
+    Number.POSITIVE_INFINITY,
+  )
+  if (!Number.isFinite(ox)) ox = 0
   for (const n of orphans) {
     const s = sizeOf(n)
     if (owns(n.id)) out[n.id] = { x: ox, y: deepest + BRANCH_GAP_X }
