@@ -73,6 +73,58 @@ describe('layoutCanvas', () => {
     assertNoOverlaps(nodes, p)
   })
 
+  it('wraps a session\'s folders into columns rather than a tower', () => {
+    // Six folders in one column would be 546px of stack either side of a 106px
+    // node — dagre reserves the taller side on both, and every sibling in the
+    // rank is pushed that far apart. Width is the axis this layout can spend.
+    const folders = Array.from({ length: 6 }, (_, i) => folder(`d${i}`))
+    const nodes = [session('s1'), ...folders]
+    const edges = folders.map((f, i) => edge(f.id, 's1', i === 0 ? 'cwd' : 'attach'))
+    const p = layoutCanvas(nodes, edges)
+    const xs = new Set(folders.map((f) => p[f.id].x))
+    const ys = new Set(folders.map((f) => p[f.id].y))
+    expect(xs.size).toBe(2)
+    expect(ys.size).toBe(3)
+    // The stack is three folders tall at most, whatever the count.
+    const span = Math.max(...ys) - Math.min(...ys) + sizeOf(folders[0]).h
+    expect(span).toBeLessThanOrEqual(3 * sizeOf(folders[0]).h + 2 * 18)
+    // Columns grow away from the agent, never over it.
+    expect(Math.max(...xs)).toBeLessThan(p.s1.x)
+    assertNoOverlaps(nodes, p)
+  })
+
+  it('keeps two or three folders in the single column they have always been', () => {
+    const nodes = [session('s1'), folder('a'), folder('b'), folder('c')]
+    const edges = [
+      edge('a', 's1', 'cwd'),
+      edge('b', 's1', 'attach'),
+      edge('c', 's1', 'attach'),
+    ]
+    const p = layoutCanvas(nodes, edges)
+    expect(new Set([p.a.x, p.b.x, p.c.x]).size).toBe(1)
+    expect(p.b.y).toBeGreaterThan(p.a.y)
+    expect(p.c.y).toBeGreaterThan(p.b.y)
+    assertNoOverlaps(nodes, p)
+  })
+
+  it('keeps siblings within a screen of each other when one has many folders', () => {
+    const folders = Array.from({ length: 6 }, (_, i) => folder(`d${i}`))
+    const nodes = [
+      session('orch'),
+      session('a'),
+      session('b'),
+      ...folders,
+    ]
+    const edges = [
+      edge('orch', 'a', 'spawn'),
+      edge('orch', 'b', 'spawn'),
+      ...folders.map((f, i) => edge(f.id, 'a', i === 0 ? 'cwd' : 'attach')),
+    ]
+    const p = layoutCanvas(nodes, edges)
+    expect(Math.abs(p.a.y - p.b.y)).toBeLessThan(700)
+    assertNoOverlaps(nodes, p)
+  })
+
   it('hangs a spawned child to the right of its parent, not under it', () => {
     const nodes = [session('parent'), session('child')]
     const edges = [edge('parent', 'child', 'spawn')]

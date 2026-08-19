@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { ArrowDown, Hexagon, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, FolderOpen, Hexagon, Plus, SlidersHorizontal, Trash2, TriangleAlert, X } from 'lucide-react'
 import { Composer } from '@/components/Composer'
 import { PlanPanel } from '@/components/PlanPanel'
 import { AgentMessage } from '@/components/AgentMessage'
@@ -14,7 +14,17 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Button } from '@/components/ui/button'
-import { canvasFilesFor, resolveCwd, searchRootsFor, useStore, type GtNode } from '@/lib/store'
+import { pickPath } from '@/lib/bridge'
+import {
+  basename,
+  canvasFilesFor,
+  folderRootsFor,
+  resolveCwd,
+  searchRootsFor,
+  useStore,
+  type FolderRoot,
+  type GtNode,
+} from '@/lib/store'
 import {
   EFFORTS,
   EFFORT_HINT,
@@ -179,6 +189,165 @@ function EffortMenu({ node }: { node: GtNode & { type: 'session' } }) {
   )
 }
 
+const shortPath = (p: string) => p.replace(/^\/Users\/[^/]+/, '~')
+
+/**
+ * One folder in the menu. At module scope on purpose: `FolderMenu` subscribes
+ * to `s.nodes`, which changes on every streamed token, and a component defined
+ * inside it gets a fresh identity every render — the rows would remount per
+ * token with the menu open, dropping hover and flickering the ✕ and ↑ buttons
+ * out from under the pointer.
+ */
+function FolderRow({
+  root,
+  onPromote,
+  onDetach,
+}: {
+  root: FolderRoot
+  onPromote: () => void
+  onDetach: () => void
+}) {
+  return (
+    <div
+      className={cn(
+        'group flex items-center gap-2 rounded px-1.5 py-1',
+        !root.primary && 'cursor-pointer hover:bg-surface',
+      )}
+      onClick={root.primary ? undefined : onPromote}
+      title={root.primary ? root.path : `${root.path}\nClick to make this the working folder`}
+    >
+      {root.missing ? (
+        <TriangleAlert size={11} className="shrink-0 text-[var(--color-danger)]" />
+      ) : (
+        <FolderOpen size={11} className="shrink-0 text-fg-muted" />
+      )}
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-mono text-[11px] text-fg">{basename(root.path)}</span>
+        <span
+          className={cn(
+            'block truncate font-mono text-[9.5px]',
+            root.missing ? 'text-[var(--color-danger)]' : 'text-fg-faint',
+          )}
+        >
+          {root.missing ? 'folder not found' : shortPath(root.path)}
+        </span>
+      </span>
+      {!root.primary && (
+        <button
+          className="h-5 w-5 shrink-0 rounded text-fg-faint opacity-0 group-hover:opacity-100 hover:bg-surface-2 hover:text-fg-muted"
+          title="Make this the working folder"
+          onClick={(e) => {
+            e.stopPropagation()
+            onPromote()
+          }}
+        >
+          <ArrowUp size={11} className="mx-auto" />
+        </button>
+      )}
+      <button
+        className="h-5 w-5 shrink-0 rounded text-fg-faint opacity-0 group-hover:opacity-100 hover:bg-surface-2 hover:text-fg-muted"
+        // The node stays: it may be the working folder of another session, and
+        // an unwired folder node is a state the canvas already handles.
+        title="Detach from this agent — the folder node stays on the canvas"
+        onClick={(e) => {
+          e.stopPropagation()
+          onDetach()
+        }}
+      >
+        <X size={11} className="mx-auto" />
+      </button>
+    </div>
+  )
+}
+
+/**
+ * The folders this session can reach, and the only place they are editable
+ * without drawing an edge.
+ *
+ * A session's folders live entirely in the graph — one `cwd` edge is the
+ * working directory, any number of `attach` edges are extra roots — so this
+ * menu is a view onto edges, not a setting of its own. It sits with the model
+ * and effort pickers because that is where the rest of this session's
+ * configuration already is.
+ */
+function FolderMenu({ node }: { node: GtNode & { type: 'session' } }) {
+  const nodes = useStore((s) => s.nodes)
+  const edges = useStore((s) => s.edges)
+  const attachFolder = useStore((s) => s.attachFolder)
+  const detachFolder = useStore((s) => s.detachFolder)
+  const setPrimaryFolder = useStore((s) => s.setPrimaryFolder)
+
+  const roots = useMemo(() => folderRootsFor(nodes, edges, node.id), [nodes, edges, node.id])
+  const primary = roots.find((r) => r.primary)
+  const extras = roots.filter((r) => !r.primary)
+
+  const add = async () => {
+    const picked = await pickPath(true)
+    if (picked) attachFolder(node.id, picked)
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          className={cn(
+            'flex min-w-0 shrink items-center rounded px-1.5 py-0.5 font-mono text-[10px] hover:bg-surface',
+            primary ? 'text-fg-subtle hover:text-fg-muted' : 'text-[var(--color-danger)]',
+          )}
+          title="Folders this agent can reach"
+        >
+          <span className="truncate">
+            {primary ? `▸ ${basename(primary.path)}` : '▸ no folder'}
+          </span>
+          {extras.length > 0 && <span className="shrink-0">&nbsp;+{extras.length}</span>}
+          <span className="shrink-0">&nbsp;▾</span>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-72">
+        <DropdownMenuLabel>Working folder</DropdownMenuLabel>
+        <div className="max-h-64 overflow-y-auto px-1">
+          {primary ? (
+            <FolderRow
+              root={primary}
+              onPromote={() => setPrimaryFolder(node.id, primary.nodeId)}
+              onDetach={() => detachFolder(node.id, primary.nodeId)}
+            />
+          ) : (
+            <p className="px-1.5 py-1 font-mono text-[10px] text-fg-faint">
+              none — this agent can't be sent to until it has one
+            </p>
+          )}
+          {extras.length > 0 && (
+            <>
+              <DropdownMenuLabel>Also reachable</DropdownMenuLabel>
+              {extras.map((r) => (
+                <FolderRow
+                  key={r.nodeId}
+                  root={r}
+                  onPromote={() => setPrimaryFolder(node.id, r.nodeId)}
+                  onDetach={() => detachFolder(node.id, r.nodeId)}
+                />
+              ))}
+            </>
+          )}
+        </div>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => void add()}>
+          <Plus size={11} /> Add folder…
+        </DropdownMenuItem>
+        {/* The one place this is said. Extra roots are absolute paths the agent
+            is told about — whether it is allowed to read them is the provider's
+            decision, not a grant this app can make. */}
+        <p className="px-2 py-1.5 font-mono text-[9.5px] leading-relaxed text-fg-faint">
+          Extra folders are context, not access: the agent is told their
+          absolute paths, and{primary ? ` runs in ${basename(primary.path)}` : ' runs in the working folder'}.
+          Project skills and MCP servers come from the working folder only.
+        </p>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 /**
  * Everything about an agent that used to be printed on its node.
  *
@@ -272,6 +441,10 @@ function SessionSettings({ node }: { node: GtNode & { type: 'session' } }) {
  */
 export function ChatPanel() {
   const nodes = useStore((s) => s.nodes)
+  // Subscribed, not read once: which folder is primary is an edge *type*, so
+  // promoting one changes no node and this panel would otherwise show the old
+  // working directory until something else re-rendered it.
+  const edges = useStore((s) => s.edges)
   const chatTarget = useStore((s) => s.chatTarget)
   const setChatTarget = useStore((s) => s.setChatTarget)
   const send = useStore((s) => s.send)
@@ -333,7 +506,14 @@ export function ChatPanel() {
   const d = active.data
   const accent = PROVIDER_ACCENT[d.provider]
   const busy = d.state === 'thinking' || d.state === 'streaming'
-  const cwd = resolveCwd(nodes, useStore.getState().edges, active.id)
+  const cwd = resolveCwd(nodes, edges, active.id)
+  // Extras get a count here too, so the composer footer and the node never
+  // disagree about how many folders this agent has.
+  // Counted against the primary flag rather than by subtracting one from the
+  // length: with no `cwd` edge, length - 1 reads "0 extras" beside "no folder"
+  // while a folder really is wired in.
+  const folderRoots = folderRootsFor(nodes, edges, active.id)
+  const extraFolders = folderRoots.filter((r) => !r.primary).length
 
   const jump = () => {
     const el = scrollRef.current
@@ -383,6 +563,7 @@ export function ChatPanel() {
 
         <ModelMenu node={active} />
         <EffortMenu node={active} />
+        <FolderMenu node={active} />
 
         <button
           onClick={() =>
@@ -473,7 +654,7 @@ export function ChatPanel() {
           placeholder={busy ? 'running…' : `Message ${d.name}   ↵ send · ⇧↵ newline · / commands · @ files`}
           busy={busy}
           cwd={cwd}
-          roots={searchRootsFor(nodes, useStore.getState().edges, active.id)}
+          roots={searchRootsFor(nodes, edges, active.id)}
           canvasFiles={canvasFilesFor(nodes)}
           provider={d.provider}
           liveCommands={[...(d.commands ?? []), ...(d.skills ?? [])]}
@@ -482,6 +663,7 @@ export function ChatPanel() {
         />
         <div className="mt-1 flex items-center gap-2 font-mono text-[9.5px] text-fg-faint">
           <span className="truncate">{cwd ? `▸ ${cwd.split('/').filter(Boolean).pop()}` : '▸ no folder'}</span>
+          {extraFolders > 0 && <span className="shrink-0">+{extraFolders}</span>}
           <span className="ml-auto shrink-0">
             {d.usage.outputTokens > 0 && `${d.usage.outputTokens} out`}
             {d.usage.costUsd > 0 && ` · $${d.usage.costUsd.toFixed(3)}`}

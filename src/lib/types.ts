@@ -254,6 +254,38 @@ export type SessionNodeData = {
    * putting it on the node. So it goes when it differs from this.
    */
   sentInstructions?: string
+  /**
+   * The set of folders as the agent last received it, normalized by
+   * `folderSetKey` — the working directory, then the extras in sorted order.
+   * Folders are usually wired in after a conversation has started, so the
+   * block goes again whenever the set changes, and never twice unchanged. It
+   * is the key rather than the rendered block because detaching and
+   * reattaching a folder reorders the extras without changing the set.
+   */
+  sentFolders?: string
+  /**
+   * Blocks that used to ride on every single turn, and now go only when they
+   * are new or have changed. Each holds the form of what was last sent, not
+   * the text of it, so the comparison survives rewording.
+   *
+   * A resumed session already has these in its history — the provider is
+   * given the conversation id and replays it — so re-sending them bought
+   * nothing and was the largest repeated cost on the canvas.
+   */
+  /** Which orchestrator protocol this agent has: `run` or `plan`. */
+  sentOrchestrator?: string
+  /** The persona roster as last described, by `rosterKey`. */
+  sentRoster?: string
+  /** The delegable peers as last listed, by `peerKey`. */
+  sentPeers?: string
+  /** Files already examined elsewhere on the canvas, by `filesKnownKey`. */
+  sentFilesKnown?: string
+  /**
+   * Digest of each attached file's contents as this agent last received them.
+   * A file whose digest is unchanged is already in the agent's history, so
+   * sending it again is paying twice for the same bytes.
+   */
+  sentFiles?: Record<string, string>
   /** The provider's own conversation id — how continuity survives a turn. */
   providerSessionId?: string
   messages: Message[]

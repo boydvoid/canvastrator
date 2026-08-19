@@ -48,7 +48,7 @@ import {
 } from '@/lib/canvas'
 import { togglePanels, usePanels } from '@/lib/panels'
 import { SHORTCUT_LABEL, keyToCanvasAction, shouldIgnoreShortcut } from '@/lib/shortcuts'
-import { useStore } from '@/lib/store'
+import { useStore, type GtNode } from '@/lib/store'
 import { PROVIDER_ACCENT, PROVIDER_LABEL, type Provider } from '@/lib/types'
 
 const nodeTypes: NodeTypes = {
@@ -100,14 +100,14 @@ function Surface() {
   const spawnAt = useCallback(
     (provider: Provider, screen: { x: number; y: number }) => {
       const id = addSession(provider, screenToFlowPosition(screen))
-      useStore.setState((s) => {
-        const folders = s.nodes.filter((n) => n.type === 'folder')
-        // With exactly one folder on the canvas the intent is unambiguous —
-        // wire it up rather than making the user draw the obvious edge.
-        return folders.length === 1
-          ? { edges: [...s.edges, { id: `cwd_${id}`, source: folders[0].id, target: id, type: 'cwd' }] }
-          : s
-      })
+      const folders = useStore
+        .getState()
+        .nodes.filter((n): n is GtNode & { type: 'folder' } => n.type === 'folder')
+      // With exactly one folder on the canvas the intent is unambiguous — wire
+      // it up rather than making the user draw the obvious edge. It goes
+      // through the same first-wins rule as a hand-drawn one, so on a brand new
+      // session it lands as the working directory and can never race one.
+      if (folders.length === 1) useStore.getState().attachFolder(id, folders[0].data.path)
     },
     [addSession, screenToFlowPosition],
   )

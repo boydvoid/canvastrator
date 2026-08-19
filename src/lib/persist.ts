@@ -1,6 +1,6 @@
 import type { Edge } from '@xyflow/react'
 import { SESSION_SIZE } from './layout'
-import type { GtNode } from './store'
+import { reconcileFolderEdges, type GtNode } from './store'
 import type { ContextEntry, Message, Notification, PersonalityNodeData, Plan } from './types'
 
 /** Bumped when the saved shape changes in a way older files can't satisfy. */
@@ -179,31 +179,39 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
 
   const ids = new Set(nodes.map((n) => n.id))
 
+  const restored = nodes.map((n) => {
+    const node = {
+      id: n.id,
+      type: n.type,
+      position: n.position ?? { x: 0, y: 0 },
+      ...(n.width ? { width: n.width } : {}),
+      ...(n.height ? { height: n.height } : {}),
+      data: n.data,
+    } as GtNode
+    // Agent nodes used to be resizable transcript windows, so canvases saved
+    // then carry whatever size the user dragged them to. They are labels
+    // now: one size, or an old canvas opens full of empty boxes.
+    if (node.type === 'session') {
+      node.width = SESSION_SIZE.w
+      node.height = SESSION_SIZE.h
+    }
+    // Belt and braces: files written before settleSession existed, or edited
+    // by hand, must still open in a usable state.
+    if (node.type === 'session') node.data = settleSession(node.data)
+    return node
+  })
+
   return {
-    nodes: nodes.map((n) => {
-      const node = {
-        id: n.id,
-        type: n.type,
-        position: n.position ?? { x: 0, y: 0 },
-        ...(n.width ? { width: n.width } : {}),
-        ...(n.height ? { height: n.height } : {}),
-        data: n.data,
-      } as GtNode
-      // Agent nodes used to be resizable transcript windows, so canvases saved
-      // then carry whatever size the user dragged them to. They are labels
-      // now: one size, or an old canvas opens full of empty boxes.
-      if (node.type === 'session') {
-        node.width = SESSION_SIZE.w
-        node.height = SESSION_SIZE.h
-      }
-      // Belt and braces: files written before settleSession existed, or edited
-      // by hand, must still open in a usable state.
-      if (node.type === 'session') node.data = settleSession(node.data)
-      return node
-    }),
-    edges: (data?.edges ?? [])
-      .filter((e) => !!e && e.type !== 'call')
-      .filter((e) => ids.has(e.source) && ids.has(e.target)),
+    nodes: restored,
+    // A canvas saved while the invariant was broken — or one whose `cwd`
+    // folder node has since been dropped above — opens with an heir promoted
+    // rather than a session that silently can't be sent to.
+    edges: reconcileFolderEdges(
+      (data?.edges ?? [])
+        .filter((e) => !!e && e.type !== 'call')
+        .filter((e) => ids.has(e.source) && ids.has(e.target)),
+      restored,
+    ),
     bus: data?.bus ?? [],
     delivered: Object.fromEntries(
       Object.entries(data?.delivered ?? {}).map(([k, v]) => [k, new Set(v)]),

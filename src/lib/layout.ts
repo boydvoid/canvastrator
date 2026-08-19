@@ -60,6 +60,14 @@ const STACK_GAP_X = 18
 /** Widest a file grid may get. Past this it pushes the next rank too far
  *  right to read as the same flow. */
 const MAX_FILE_COLUMNS = 3
+/** Tallest a support stack may get before it takes another column.
+ *
+ *  A session's supports used to stack in one column, and `blockOf` reserves
+ *  the taller of the strip's two sides on *both* — so five folders wired into
+ *  one agent reserved ~450px above and below a 106px node, and `nodesep`
+ *  pushed every sibling that far apart. Wrapping trades that for width, which
+ *  under `rankdir: 'LR'` is the axis this layout was chosen to spend. */
+const MAX_SUPPORT_ROWS = 3
 /** A parent's strip to the column of children beside it — a readable level. */
 const LEVEL_GAP_X = 150
 /** Between sibling subtrees in a column. */
@@ -228,6 +236,40 @@ function supportSize(s: Support) {
  */
 const gridCols = (n: number) => Math.max(1, Math.min(MAX_FILE_COLUMNS, Math.ceil(n / 4)))
 
+/**
+ * The supports beside an agent, wrapped into columns that grow away from it.
+ *
+ * Rows and columns are measured individually rather than on a uniform cell: a
+ * skill node is two and a half times a folder's height, and squaring the grid
+ * off against the tallest member would give back the height the wrap just
+ * saved. At three or fewer supports this is the single right-aligned column it
+ * has always been.
+ */
+function supportGrid(items: Support[]) {
+  const boxes = items.map(supportSize)
+  const cols = Math.max(1, Math.ceil(boxes.length / MAX_SUPPORT_ROWS))
+  const rows = Math.max(1, Math.ceil(boxes.length / cols))
+  // Column-major: a column fills top to bottom before the next one starts, so
+  // reading order runs down the column nearest the agent first.
+  const cellOf = (i: number) => ({ col: Math.floor(i / rows), row: i % rows })
+  const rowH = Array.from({ length: rows }, (_, r) =>
+    Math.max(0, ...boxes.filter((_, i) => cellOf(i).row === r).map((b) => b.h)),
+  )
+  const colW = Array.from({ length: cols }, (_, c) =>
+    Math.max(0, ...boxes.filter((_, i) => cellOf(i).col === c).map((b) => b.w)),
+  )
+  return {
+    boxes,
+    cols,
+    rows,
+    rowH,
+    colW,
+    cellOf,
+    w: boxes.length ? stackHeight(colW, STACK_GAP_X) : 0,
+    h: boxes.length ? stackHeight(rowH, STACK_GAP_Y) : 0,
+  }
+}
+
 /** Total height of a vertical stack, including the gaps between its members. */
 const stackHeight = (heights: number[], gap: number) =>
   heights.reduce((sum, h) => sum + h, 0) + Math.max(0, heights.length - 1) * gap
@@ -257,13 +299,7 @@ export function layoutCanvas(
     const session = byId.get(id)
     const own = session ? sizeOf(session) : DEFAULT_SIZE.session
 
-    const mySupports = supports.get(id) ?? []
-    const supportBoxes = mySupports.map(supportSize)
-    const supportsW = Math.max(0, ...supportBoxes.map((b) => b.w))
-    const supportsH = stackHeight(
-      supportBoxes.map((b) => b.h),
-      STACK_GAP_Y,
-    )
+    const grid = supportGrid(supports.get(id) ?? [])
 
     const myOutputs = outputs.get(id) ?? []
     const cell = {
@@ -280,16 +316,16 @@ export function layoutCanvas(
     // sits in rather than doubling back through the top and bottom of a node.
     return {
       own,
-      supportsH,
+      supports: grid,
       outputsH,
       cell,
       cols,
-      leftPad: supportsW ? supportsW + BRANCH_GAP_X : 0,
+      leftPad: grid.w ? grid.w + BRANCH_GAP_X : 0,
       rightPad: outputsW ? outputsW + BRANCH_GAP_X : 0,
       // Only ever as tall as the strip really is: supports and files are both
       // centred on the session, so the strip is symmetric about it and dagre
       // can keep siblings clear of each other by height alone.
-      height: Math.max(own.h, supportsH, outputsH),
+      height: Math.max(own.h, grid.h, outputsH),
     }
   }
 
@@ -380,17 +416,28 @@ export function layoutCanvas(
     const cy = sy + block.own.h / 2
     if (!fixed) out[s.id] = { x: sx, y: sy }
 
-    // Supports in a column to the left, each with its tool nodes beneath it.
-    let py = Math.round(cy - block.supportsH / 2)
-    for (const sup of supports.get(s.id) ?? []) {
-      const box = supportSize(sup)
+    // Supports to the left, in columns that grow away from the session, each
+    // with its tool nodes beside it.
+    const grid = block.supports
+    const gridTopY = cy - grid.h / 2
+    // Where each row starts and each column ends, accumulated once so the
+    // per-support arithmetic below is a lookup.
+    const rowTop = grid.rowH.map((_, r) =>
+      grid.rowH.slice(0, r).reduce((sum, h) => sum + h + STACK_GAP_Y, gridTopY),
+    )
+    const colRight = grid.colW.map((_, c) =>
+      grid.colW.slice(0, c).reduce((x, w) => x - w - STACK_GAP_X, sx - BRANCH_GAP_X),
+    )
+    ;(supports.get(s.id) ?? []).forEach((sup, i) => {
+      const box = grid.boxes[i]
       const nodeSize = sizeOf(sup.node)
-      // The cluster is right-aligned against the session, so every support
+      const { col, row } = grid.cellOf(i)
+      // The cluster is right-aligned in its column, so every support in it
       // ends on the same line however wide it is.
-      const left = sx - BRANCH_GAP_X - box.w
-      const centre = py + box.h / 2
+      const left = colRight[col] - box.w
+      const centre = rowTop[row] + grid.rowH[row] / 2
       if (owns(sup.node.id)) {
-        out[sup.node.id] = { x: left, y: Math.round(centre - nodeSize.h / 2) }
+        out[sup.node.id] = { x: Math.round(left), y: Math.round(centre - nodeSize.h / 2) }
       }
       // A server's tools go in the lane between it and the agent — still left
       // to right, rather than doubling back under the node.
@@ -400,11 +447,10 @@ export function layoutCanvas(
       )
       let ky = Math.round(centre - kidsH / 2)
       for (const kid of sup.kids) {
-        if (owns(kid.id)) out[kid.id] = { x: left + nodeSize.w + SATELLITE_GAP_X, y: ky }
+        if (owns(kid.id)) out[kid.id] = { x: Math.round(left + nodeSize.w + SATELLITE_GAP_X), y: ky }
         ky += sizeOf(kid).h + STACK_GAP_Y
       }
-      py += box.h + STACK_GAP_Y
-    }
+    })
 
     // Outputs in a grid off the session's right, read left to right, so the
     // newest file is the last cell of the last row.

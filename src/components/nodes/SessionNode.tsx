@@ -1,7 +1,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { CircleAlert, Hexagon, Loader2 } from 'lucide-react'
-import { resolveCwd, useStore, type GtNode } from '@/lib/store'
+import { folderRootsFor, useStore, type GtNode } from '@/lib/store'
 import { PROVIDER_ACCENT, PROVIDER_LABEL, type SessionNodeData } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
@@ -69,8 +69,22 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
   const awaitingApproval = useStore((s) =>
     s.plan?.fromNodeId === id ? s.plan.steps.filter((st) => st.state === 'pending').length : 0,
   )
-  // cwd comes from the graph, not from node state — the wiring is the truth.
-  const cwd = useStore((s) => resolveCwd(s.nodes, s.edges, id))
+  // Folders come from the graph, not from node state — the wiring is the
+  // truth. Selected as one string because a selector that builds an array
+  // returns a new one every store tick and would re-render on every token.
+  // Primacy is encoded rather than left to position: `folderRootsFor` sorts
+  // primary-first but cannot promise one exists, and reading index 0 as the
+  // working directory renders an orphaned extra root as the cwd.
+  const folderKey = useStore((s) =>
+    folderRootsFor(s.nodes, s.edges, id)
+      .map((r) => `${r.primary ? '*' : '-'}${r.missing ? '!' : ''}${r.path}`)
+      .join('\n'),
+  )
+  const folders = useMemo(() => (folderKey ? folderKey.split('\n') : []), [folderKey])
+  const primary = folders.find((f) => f.startsWith('*'))
+  const cwd = primary ? primary.replace(/^\*!?/, '') : null
+  const cwdMissing = primary?.startsWith('*!') ?? false
+  const extras = folders.length - (primary ? 1 : 0)
   // Which conversation the dock is showing, so the two are visibly the same
   // thing rather than a node and an unrelated chat.
   const inDock = useStore(
@@ -119,7 +133,17 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
             : {}),
         } as React.CSSProperties
       }
-      title={`${d.name} · ${PROVIDER_LABEL[d.provider]}${cwd ? `\n${cwd}` : ''}\nClick to open in the panel`}
+      title={[
+        `${d.name} · ${PROVIDER_LABEL[d.provider]}`,
+        // The working directory is only worth naming as such when there is
+        // something else it could be confused with.
+        ...folders.map((f) => {
+          const path = f.replace(/^[*-]!?/, '')
+          if (f[1] === '!') return `${path} — folder not found`
+          return folders.length > 1 && f.startsWith('*') ? `${path} (cwd)` : path
+        }),
+        'Click to open in the panel',
+      ].join('\n')}
     >
       {/* One direction only: everything an agent is given enters on the left,
           everything it produces leaves on the right. Keep the flow handles
@@ -167,9 +191,18 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
 
       <div className="flex min-w-0 items-center gap-1.5 font-mono text-[9.5px] text-fg-faint">
         <span className="shrink-0">{PROVIDER_LABEL[d.provider]}</span>
-        <span className="truncate">
+        {/* A count, never a list: the node is a fixed 260×106 and the paths
+            live in the tooltip and the folder menu in the dock. */}
+        <span
+          className={cn('truncate', cwdMissing && 'text-[var(--color-danger)]')}
+        >
           {cwd ? `▸ ${cwd.split('/').filter(Boolean).pop()}` : '▸ no folder'}
         </span>
+        {extras > 0 && (
+          <span className="shrink-0" title={`${extras} more folder${extras > 1 ? 's' : ''} attached`}>
+            +{extras}
+          </span>
+        )}
         {busy && <span className="ml-auto shrink-0" style={{ color: accent }}>{d.state}</span>}
         {!busy && d.state === 'dead' && <span className="ml-auto shrink-0">dead</span>}
       </div>

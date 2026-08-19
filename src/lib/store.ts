@@ -9,7 +9,9 @@ import {
   type Node,
   type NodeChange,
 } from '@xyflow/react'
-import { dirExists, fileExists, interruptSession, readFileHead, sendTurn } from './bridge'
+import { dirExists, fileExists, interruptSession, sendTurn } from './bridge'
+import { digest, readShared } from './filecache'
+import { handBack, parseReport, REPORT_INSTRUCTION, reportBlock } from './report'
 import { looksLikeQuestion } from './asking'
 import { boxOf, FILE_SIZE, findFreeSpot, layoutCanvas, SESSION_SIZE, sizeOf } from './layout'
 import { parsePersonaDefinitions } from './persona-parse'
@@ -122,6 +124,17 @@ type State = {
   addSessionFromPersona: (persona: Persona, pos: { x: number; y: number }) => string
   addSkill: (pos: { x: number; y: number }, seed?: Partial<SkillNodeData>) => string
   addFolder: (path: string, pos: { x: number; y: number }) => string
+  /**
+   * Give a session another folder to reach. Reuses a folder node already on
+   * the canvas for that path rather than adding a second one for the same
+   * directory. Returns the folder node's id, or null when it was already wired
+   * into this session.
+   */
+  attachFolder: (sessionNodeId: string, path: string) => string | null
+  /** Unwire a folder from a session. The node stays — it may feed others. */
+  detachFolder: (sessionNodeId: string, folderNodeId: string) => void
+  /** Make an attached folder the working directory, demoting the incumbent. */
+  setPrimaryFolder: (sessionNodeId: string, folderNodeId: string) => void
   addFile: (path: string, pos: { x: number; y: number }, origin?: 'user' | 'agent') => string
   addMcp: (server: McpServer, pos: { x: number; y: number }) => string
   initLibrary: () => Promise<void>
@@ -214,17 +227,224 @@ export function parseMcpTool(name: string): { server: string; tool: string } | n
   return m ? { server: m[1], tool: m[2] } : null
 }
 
+/** A folder a session reaches, and in which capacity. */
+export type FolderRoot = {
+  nodeId: string
+  path: string
+  /** True for the one `cwd` edge — the process's actual working directory. */
+  primary: boolean
+  missing: boolean
+}
+
+/**
+ * Every folder wired into a session, primary first.
+ *
+ * A session's folders are carried entirely by edge *type*: exactly one `cwd`
+ * edge is the working directory, and any number of `attach` edges are extra
+ * roots it may read from. Nothing about this lives in node data, so promoting
+ * an extra root to primary is a retype rather than a field to keep in sync.
+ *
+ * Missing folders are included and flagged rather than dropped — a folder that
+ * has gone away must be visible so the user can fix or detach it.
+ */
+export function folderRootsFor(
+  nodes: GtNode[],
+  edges: Edge[],
+  sessionNodeId: string,
+): FolderRoot[] {
+  const roots = edges
+    .filter((e) => e.target === sessionNodeId && (e.type === 'cwd' || e.type === 'attach'))
+    .map((e) => ({ edge: e, node: nodes.find((n) => n.id === e.source) }))
+    .filter((x): x is { edge: Edge; node: GtNode & { type: 'folder' } } => !!x.node && isFolder(x.node))
+    .map(({ edge, node }) => ({
+      nodeId: node.id,
+      path: node.data.path,
+      primary: edge.type === 'cwd',
+      missing: !!node.data.missing,
+    }))
+  // Primary first; the rest keep the order their edges were created in, which
+  // is the order the user wired them.
+  return [...roots.filter((r) => r.primary), ...roots.filter((r) => !r.primary)]
+}
+
+/**
+ * Two paths naming the same directory, as far as we can tell from a string.
+ *
+ * Trailing slashes are the difference the picker and hand-typed paths actually
+ * produce, so those go. Symlinks and macOS's case-insensitive filesystem can
+ * still hide a duplicate — resolving those means canonicalising on the Rust
+ * side, which is not something the store can do synchronously.
+ */
+export function samePath(a: string, b: string): boolean {
+  const trim = (p: string) => (p.length > 1 ? p.replace(/\/+$/, '') : p)
+  return trim(a) === trim(b)
+}
+
+/**
+ * Give every session with folder edges exactly one `cwd`.
+ *
+ * The invariant used to be maintained only where folders were detached from
+ * the folder menu, which left three other ways to break it: deleting a folder
+ * node, selecting the `cwd` edge and pressing delete, and opening a canvas
+ * saved while broken. A session with `attach` edges and no `cwd` cannot be
+ * sent to at all, while every folder UI still shows it wired in — so this runs
+ * after each edge mutation rather than at the one call site that noticed.
+ *
+ * Returns the input array untouched when nothing needed fixing, so the common
+ * case costs no re-render.
+ */
+export function reconcileFolderEdges(edges: Edge[], nodes: GtNode[]): Edge[] {
+  const folderIds = new Set(nodes.filter(isFolder).map((n) => n.id))
+  const bySession = new Map<string, Edge[]>()
+  for (const e of edges) {
+    if ((e.type !== 'cwd' && e.type !== 'attach') || !folderIds.has(e.source)) continue
+    const list = bySession.get(e.target)
+    if (list) list.push(e)
+    else bySession.set(e.target, [e])
+  }
+
+  const retype = new Map<string, 'cwd' | 'attach'>()
+  for (const list of bySession.values()) {
+    // Oldest survivor wins, edge order being wiring order — the same
+    // first-wins rule `onConnect` uses when assigning the first edge's type.
+    const keep = list.find((e) => e.type === 'cwd') ?? list[0]
+    for (const e of list) {
+      const want = e === keep ? 'cwd' : 'attach'
+      if (e.type !== want) retype.set(e.id, want)
+    }
+  }
+  if (!retype.size) return edges
+  return edges.map((e) => {
+    const want = retype.get(e.id)
+    return want ? { ...e, type: want } : e
+  })
+}
+
+const cwdSourceFor = (edges: Edge[], sessionNodeId: string) =>
+  edges.find((e) => e.target === sessionNodeId && e.type === 'cwd')?.source
+
+/**
+ * Reconcile after an edge mutation, and tell any session whose working
+ * directory changed under it. A promotion the user didn't ask for is exactly
+ * the kind of thing that has to be said out loud in the transcript.
+ */
+function reconcileFolders(
+  nodes: GtNode[],
+  prevEdges: Edge[],
+  nextEdges: Edge[],
+): { nodes: GtNode[]; edges: Edge[] } {
+  const edges = reconcileFolderEdges(nextEdges, nodes)
+  if (edges === nextEdges) return { nodes, edges }
+
+  const promoted = new Map<string, string>()
+  for (const e of edges) {
+    if (e.type !== 'cwd') continue
+    const before = cwdSourceFor(prevEdges, e.target)
+    // Only an inherited primary is news; a session gaining its first folder
+    // already knows, having just been wired to one.
+    if (before && before !== e.source) promoted.set(e.target, e.source)
+  }
+  if (!promoted.size) return { nodes, edges }
+
+  return {
+    edges,
+    nodes: nodes.map((n) => {
+      const heirId = promoted.get(n.id)
+      if (!heirId || !isSession(n)) return n
+      const heir = nodes.find((f) => f.id === heirId)
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          messages: [
+            ...n.data.messages,
+            {
+              id: uid(),
+              role: 'system' as const,
+              text: `Working directory is now ${
+                heir && isFolder(heir) ? heir.data.path : 'the remaining folder'
+              }.`,
+              tools: [],
+            },
+          ],
+        },
+      }
+    }) as GtNode[],
+  }
+}
+
 /**
  * Folder nodes a session may search. The graph is the boundary here as
  * everywhere else: a directory that isn't on the canvas cannot be reached,
  * whatever the session's cwd happens to be.
  */
 export function searchRootsFor(nodes: GtNode[], edges: Edge[], sessionNodeId: string): string[] {
-  return edges
-    .filter((e) => e.target === sessionNodeId && (e.type === 'cwd' || e.type === 'attach'))
-    .map((e) => nodes.find((n) => n.id === e.source))
-    .filter((n): n is GtNode & { type: 'folder' } => !!n && isFolder(n) && !n.data.missing)
-    .map((n) => n.data.path)
+  return folderRootsFor(nodes, edges, sessionNodeId)
+    .filter((r) => !r.missing)
+    .map((r) => r.path)
+}
+
+/**
+ * The folders this agent can reach, as a block to lead its opening turn with.
+ *
+ * A process has exactly one working directory — `.current_dir()` takes one
+ * path — so extra roots reach the agent as *context*: absolute paths it has
+ * been told about and may read from. Whether it is actually permitted to is
+ * the provider's decision, not something this block grants.
+ *
+ * One folder produces nothing: the agent is already sitting in it, and saying
+ * so adds a block that carries no information.
+ */
+export function canvasFoldersBlock(roots: FolderRoot[]): string {
+  const live = roots.filter((r) => !r.missing)
+  if (live.length < 2) return ''
+  const lines = live.map((r) =>
+    r.primary ? `${r.path} (working directory)` : r.path,
+  )
+  return [
+    '<canvas-folders>',
+    'This canvas gives you more than one folder. Your working directory is the',
+    'first; the others are reachable by absolute path, not by relative path.',
+    '',
+    ...lines,
+    '</canvas-folders>',
+  ].join('\n')
+}
+
+/**
+ * What the agent has been told, as a value that doesn't care about order.
+ *
+ * Comparing the rendered block instead would call a detach-then-reattach of
+ * the same directory a change, because it reorders the extras — and the block
+ * promises to go out only when the set really changed.
+ */
+export function folderSetKey(roots: FolderRoot[]): string {
+  const live = roots.filter((r) => !r.missing)
+  const primary = live.find((r) => r.primary)
+  return [
+    primary?.path ?? '',
+    ...live.filter((r) => !r.primary).map((r) => r.path).sort(),
+  ].join('\n')
+}
+
+/**
+ * What to tell an agent that has just dropped back to a single folder.
+ *
+ * `canvasFoldersBlock` is empty in that case, and saying nothing would leave
+ * the extra roots it was handed earlier sitting unretracted in its history —
+ * paths it would go on reading from.
+ */
+export function canvasFoldersEndedBlock(roots: FolderRoot[]): string {
+  const primary = roots.find((r) => r.primary && !r.missing)
+  return [
+    '<canvas-folders>',
+    primary
+      ? `You now have one folder: ${primary.path}, your working directory.`
+      : 'You now have no folder attached.',
+    'Any other folders named earlier in this conversation are no longer',
+    'reachable — do not read from them.',
+    '</canvas-folders>',
+  ].join('\n')
 }
 
 /** File nodes already on the canvas, mentionable without any search. */
@@ -272,6 +492,245 @@ export function mcpFor(nodes: GtNode[], edges: Edge[], sessionNodeId: string): M
  */
 export function rosterFor(library: Persona[]): Persona[] {
   return library
+}
+
+/** One persona as the orchestrator reads it when routing. */
+export const rosterLine = (p: Persona) =>
+  `- ${p.name} (${p.provider}${p.model ? `/${p.model}` : ''}${
+    p.effort ? `, ${p.effort} effort` : ''
+  }, ${p.permission}) — ${p.description}`
+
+/**
+ * The roster as a value that changes only when the routing would.
+ *
+ * Comparing the rendered list would do, but this says what the comparison is
+ * actually for: everything the orchestrator uses to choose a persona, and
+ * nothing else. A persona's id or its position in the library moving is not a
+ * reason to spend a turn's tokens telling every orchestrator about it.
+ */
+export function rosterKey(roster: Persona[]): string {
+  return roster.map(rosterLine).sort().join('\n')
+}
+
+/**
+ * A roster that has changed since the orchestrator was last told about it.
+ *
+ * The full protocol block is thousands of characters and the agent already
+ * has it in history; the personas are the only part of it that moves, so
+ * when one is added or edited that is the only part that goes again.
+ */
+export function rosterUpdateBlock(roster: Persona[]): string {
+  return [
+    '<canvastrator-personas>',
+    'The persona library has changed. This is now the full list you may',
+    'instantiate — it replaces the one you were given earlier:',
+    '',
+    roster.length ? roster.map(rosterLine).join('\n') : '(none)',
+    '</canvastrator-personas>',
+  ].join('\n')
+}
+
+/**
+ * The orchestrator's standing brief: what it is for, and how to say what it
+ * wants done.
+ *
+ * Sent once per session, and again only when planning mode flips — the
+ * protocol is the half of this that changes with the mode, and it is not
+ * separable from the rest without leaving the example contradicting it. A
+ * roster that changes on its own goes as a `rosterUpdateBlock` instead, which
+ * is a tenth of the size.
+ */
+export function orchestratorBlock(roster: Persona[], planning: boolean): string {
+  const list = roster.length ? roster.map(rosterLine).join('\n') : '(none yet)'
+
+  // Planning mode changes what the orchestrator is for: it proposes the
+  // whole job and the user approves it, rather than starting the first
+  // piece of work it thinks of. The gate is enforced when the turn ends,
+  // so this is here to make the reply the right shape, not to hold the
+  // line on its own.
+  const protocol = planning
+    ? [
+        'Canvastrator is in PLANNING MODE: you do not start work, you propose it. Set out the whole job as one line per step, in the order the steps should run:',
+        'PLAN <persona-name>: <the task, stated fully enough to act on without further context>',
+        '',
+        'A step ends at the end of its line, so keep each task on one line however long it is. Put any commentary of your own before the first PLAN line.',
+        '',
+        'Nothing runs until the user approves it, and they may edit a task, drop a step, or approve steps one at a time. So plan the whole job rather than only the first move, and make each step say enough to be judged on its own. Each step that runs reports back to you before the next one starts; if what comes back changes the plan, write new PLAN lines then.',
+        '',
+      ]
+    : [
+        'To run one, put this in your reply:',
+        'SPAWN <persona-name>: <the task, stated fully enough to act on without further context>',
+        '',
+        'The task may run over several paragraphs — everything after the colon belongs to it, to the end of your reply. So put any commentary of your own BEFORE the SPAWN line, never after it.',
+        '',
+      ]
+
+  return [
+    '<canvastrator-orchestrator>',
+    'You are the orchestrator of a canvas of agents. Your job is to route work, not to perform it.',
+    '',
+    'Do the work yourself ONLY when it is trivial: a direct question about this conversation, a one-line clarification, or deciding what to do next. Anything that involves reading a codebase, writing or changing files, running commands, designing, reviewing, or research goes to a specialist — even when you could do it. A task you complete yourself is a task the user cannot see, re-run, or reassign.',
+    '',
+    'Available personas:',
+    list,
+    '',
+    ...protocol,
+    `If none of the available personas is a good fit, INVENT ONE FIRST. Do not force a bad fit, and do not fall back to doing it yourself. Define it with a fenced block, then ${planning ? 'use it in a step' : 'spawn it'} in the same reply:`,
+    '',
+    '```canvastrator-persona',
+    'name: api-designer',
+    'provider: claude',
+    `model: ${EXAMPLE_CLAUDE_MODEL}`,
+    'effort: high',
+    'permission: plan',
+    'description: Designs HTTP APIs and data contracts. Use before implementing an endpoint.',
+    '---',
+    'You design APIs. Produce the contract — routes, payloads, status codes, error shapes — and the reasoning behind it. Do not write implementation code.',
+    '```',
+    `${planning ? 'PLAN' : 'SPAWN'} api-designer: Design the /sessions endpoint for …`,
+    '',
+    'Choosing the fields:',
+    '- provider: claude, codex, or opencode.',
+    `- model: match the model to the work, using the mapping below — it is explicit, so never infer rank from the order of a list. Use one of the ids the chosen provider takes, or omit it to take the provider default.\n${MODEL_GUIDE}`,
+    '- effort: how hard it should think. low for mechanical passes, medium for ordinary implementation and review, high for architecture and hard debugging, xhigh or max only for genuinely difficult problems — they are slow and expensive. Omit it and the persona runs at medium.',
+    '- permission: plan for anything read-only (review, research, design), auto when it must edit files or run commands, full only when it genuinely needs an unsandboxed machine.',
+    '- description: when a future orchestrator should reach for this. It is the only thing routing sees, so make it specific.',
+    '',
+    'A persona you define is saved to the user\'s library and reusable on every canvas, so define it as a lasting role, not a one-off errand. Name it for the role, never for the specific task.',
+    '',
+    `If this turn carries a <canvas-global-rules> block, those rules are the user's and they bind you. They also bind everyone you spawn: Canvastrator gives each new agent the same block, and you must restate anything task-specific from it in the ${planning ? 'PLAN' : 'SPAWN'} text you write.`,
+    '</canvastrator-orchestrator>',
+  ].join('\n')
+}
+
+/**
+ * How to read a conversation whose setup does not repeat itself.
+ *
+ * Canvastrator sends each standing block — the brief, the folders, the
+ * personas, an attached file — once, and again only when it changes, because
+ * the provider is replaying the conversation and the agent is already holding
+ * them. Without being told that, an agent has every reason to read the
+ * disappearance of its folder block as the folders being withdrawn, and to
+ * start asking where its files went.
+ */
+export const standingBlock = () =>
+  [
+    '<canvastrator-standing>',
+    'Every block Canvastrator sends you stays in force for the whole conversation.',
+    'They are sent once, when they are new or when they change — not repeated every',
+    'turn. A block missing from a later turn has not been withdrawn; it still',
+    'applies. Only a block that says it replaces an earlier one has changed anything.',
+    '</canvastrator-standing>',
+  ].join('\n')
+
+/** The agents an orchestrator may hand a task to, as a block. */
+export function peersBlock(names: { name: string; provider: Provider }[]): string {
+  if (!names.length) return ''
+  return [
+    '<canvastrator-agents>',
+    'Other agents you can delegate to:',
+    ...names.map((p) => `- ${p.name} (${p.provider})`),
+    '',
+    'To delegate, put a line in your reply of exactly this form:',
+    'DELEGATE <agent-name>: <the task>',
+    'Canvastrator will run it on that agent and report back. Only delegate when it genuinely helps.',
+    'This list replaces any you were given earlier.',
+    '</canvastrator-agents>',
+  ].join('\n')
+}
+
+export const peerKey = (names: { name: string }[]) =>
+  names.map((p) => p.name).sort().join('\n')
+
+/**
+ * What to tell an orchestrator whose last colleague just left the canvas.
+ *
+ * `peersBlock` is empty in that case, and saying nothing would leave the names
+ * it was given earlier standing — it would go on addressing DELEGATE lines to
+ * agents that no longer exist, which fails silently at the lookup.
+ */
+export const peersEndedBlock = () =>
+  [
+    '<canvastrator-agents>',
+    'There are no other agents on this canvas now. Anyone named earlier in this',
+    'conversation is gone — do not delegate to them.',
+    '</canvastrator-agents>',
+  ].join('\n')
+
+/**
+ * Files another agent on this canvas has already opened.
+ *
+ * The point of a canvas of agents is that they are working on one thing, and
+ * the expensive part of that is reading: four workers pointed at the same repo
+ * will each spend a turn discovering the same files. This does not hand over
+ * the contents — a worker still reads what it needs, with its own judgement
+ * about what matters — it hands over the map, so the reading is aimed rather
+ * than exploratory.
+ *
+ * Only files an agent *touched* are listed. A file the user dropped on the
+ * canvas is either wired into this session, in which case it arrives in full,
+ * or it is not, in which case nobody has read it and there is nothing to say.
+ */
+export function filesKnown(
+  nodes: GtNode[],
+  edges: Edge[],
+  sessionNodeId: string,
+): { path: string; by: string[]; written: boolean }[] {
+  // Attached to this session already: it gets those in full, so naming them
+  // here would be telling it about files it is holding.
+  const attached = new Set(
+    edges
+      .filter((e) => e.target === sessionNodeId && e.type === 'file')
+      .map((e) => e.source),
+  )
+
+  return nodes
+    .filter((n): n is GtNode & { type: 'file' } => isFile(n) && !attached.has(n.id))
+    .map((f) => {
+      const by = edges
+        .filter((e) => e.type === 'file' && e.target === f.id && e.source !== sessionNodeId)
+        .map((e) => nodes.find((n) => n.id === e.source))
+        .filter((n): n is GtNode & { type: 'session' } => !!n && isSession(n))
+        .map((n) => n.data.name)
+      return { path: f.data.path, by, written: !!f.data.written }
+    })
+    .filter((f) => f.by.length > 0)
+}
+
+/** How many files the map may name in one turn. */
+const MAX_KNOWN_FILES = 40
+
+type KnownFile = ReturnType<typeof filesKnown>[number]
+
+/** One file's line in the map, as a value — what changes when it changes. */
+export const filesKnownEntry = (f: KnownFile) =>
+  `${f.path}:${f.written ? 'w' : 'r'}:${f.by.slice().sort().join(',')}`
+
+export const filesKnownKey = (files: KnownFile[]) =>
+  files.map(filesKnownEntry).sort().join('\n')
+
+/**
+ * The map, listing only what the agent has not already been told.
+ *
+ * A canvas of busy agents grows this list on nearly every turn, so sending
+ * the whole map each time would re-send the same paths for the life of the
+ * session — the exact waste this is meant to remove.
+ */
+export function filesKnownBlock(files: KnownFile[]): string {
+  if (!files.length) return ''
+  const shown = files.slice(0, MAX_KNOWN_FILES)
+  const rest = files.length - shown.length
+  return [
+    '<canvas-files-known>',
+    'Other agents on this canvas have already opened these files. This is a map,',
+    'not their contents — read what you need, but start here rather than',
+    'searching, and do not re-read a file just to confirm what it is.',
+    '',
+    ...shown.map((f) => `${f.path} — ${f.written ? 'changed' : 'read'} by ${f.by.join(', ')}`),
+    ...(rest > 0 ? [`…and ${rest} more.`] : []),
+    '</canvas-files-known>',
+  ].join('\n')
 }
 
 export const basename = (p: string) => p.replace(/\/+$/, '').split('/').pop() || p
@@ -380,7 +839,10 @@ export const useStore = create<State>((set, get) => ({
   onNodesChange: (changes) =>
     set((s) => ({ nodes: applyNodeChanges(changes, s.nodes) as GtNode[] })),
 
-  onEdgesChange: (changes) => set((s) => ({ edges: applyEdgeChanges(changes, s.edges) })),
+  // Every edge mutation funnels through the same reconciliation, so deleting
+  // a `cwd` edge by hand cannot leave a session wired to folders it can't use.
+  onEdgesChange: (changes) =>
+    set((s) => reconcileFolders(s.nodes, s.edges, applyEdgeChanges(changes, s.edges))),
 
   onConnect: (conn) =>
     set((s) => {
@@ -410,13 +872,17 @@ export const useStore = create<State>((set, get) => ({
       if (isMcp(source) && isSession(target)) {
         return { edges: addEdge({ ...conn, type: 'attach' }, s.edges) }
       }
-      // A folder wired into a session IS that session's cwd. Only one may be,
-      // so a new one replaces the old rather than silently competing.
+      // The first folder wired into a session is its working directory; every
+      // folder after it is an extra root it may read from. First-wins, the same
+      // way `addSession` assigns the orchestrator role by ordinal — no wire
+      // silently destroys an earlier one, and promotion is an explicit act.
       if (isFolder(source) && isSession(target)) {
-        const withoutOldCwd = s.edges.filter(
-          (e) => !(e.target === target.id && e.type === 'cwd'),
-        )
-        return { edges: addEdge({ ...conn, type: 'cwd' }, withoutOldCwd) }
+        const already = folderRootsFor(s.nodes, s.edges, target.id)
+        // By resolved path, not node id: two folder nodes may hold the same
+        // directory, and granting it twice would be one root under two edges.
+        if (already.some((r) => samePath(r.path, source.data.path))) return s
+        const type = already.some((r) => r.primary) ? 'attach' : 'cwd'
+        return { edges: addEdge({ ...conn, type }, s.edges) }
       }
       // A file wired into a session is context for it.
       if (isFile(source) && isSession(target)) {
@@ -509,6 +975,84 @@ export const useStore = create<State>((set, get) => ({
     return id
   },
 
+  attachFolder: (sessionNodeId, path) => {
+    const st = get()
+    const session = st.nodes.find((n) => n.id === sessionNodeId)
+    if (!session || !isSession(session)) return null
+
+    // Already reachable from this session — by path, since two folder nodes
+    // may hold the same directory.
+    const already = folderRootsFor(st.nodes, st.edges, sessionNodeId)
+    const dupe = already.find((r) => samePath(r.path, path))
+    if (dupe) {
+      set({ selectedId: dupe.nodeId })
+      return null
+    }
+
+    const existing = st.nodes.find((n) => isFolder(n) && samePath(n.data.path, path))
+    const folderId =
+      existing?.id ??
+      get().addFolder(
+        path,
+        findFreeSpot(
+          {
+            x: session.position.x - 320,
+            y: session.position.y,
+            w: 256,
+            h: 76,
+          },
+          st.nodes.map(boxOf),
+        ),
+      )
+
+    // Same first-wins rule as wiring the edge by hand.
+    const type = already.some((r) => r.primary) ? 'attach' : 'cwd'
+    set((s) => ({
+      edges: [
+        ...s.edges,
+        { id: `${type}_${uid()}`, source: folderId, target: sessionNodeId, type },
+      ],
+    }))
+    return folderId
+  },
+
+  detachFolder: (sessionNodeId, folderNodeId) =>
+    set((s) => {
+      const edge = s.edges.find(
+        (e) =>
+          e.target === sessionNodeId &&
+          e.source === folderNodeId &&
+          (e.type === 'cwd' || e.type === 'attach'),
+      )
+      if (!edge) return s
+      // Losing the working directory while extra roots remain would leave the
+      // session unable to run but visibly wired to folders — the worst state
+      // available. Reconciliation promotes the oldest survivor and says so.
+      return reconcileFolders(
+        s.nodes,
+        s.edges,
+        s.edges.filter((e) => e.id !== edge.id),
+      )
+    }),
+
+  // Uniqueness enforced by the writer, in one `set`: the incumbent is demoted
+  // in the same update that promotes its replacement, so "exactly one cwd edge
+  // per session" is never briefly false.
+  setPrimaryFolder: (sessionNodeId, folderNodeId) =>
+    set((s) => {
+      const target = s.edges.find(
+        (e) => e.target === sessionNodeId && e.source === folderNodeId && e.type === 'attach',
+      )
+      if (!target) return s
+      return {
+        edges: s.edges.map((e) => {
+          if (e.id === target.id) return { ...e, type: 'cwd' }
+          if (e.target === sessionNodeId && e.type === 'cwd') return { ...e, type: 'attach' }
+          return e
+        }),
+      }
+    }),
+
   addFile: (path, pos, origin = 'user') => {
     const existing = get().nodes.find((n) => isFile(n) && n.data.path === path)
     if (existing) return existing.id
@@ -525,7 +1069,9 @@ export const useStore = create<State>((set, get) => ({
       ],
       ...(origin === 'user' ? { selectedId: id } : {}),
     }))
-    void readFileHead(path)
+    // Through the shared cache: an agent that just read this file paid for it
+    // already, and the node only needs the first 400 characters of it.
+    void readShared(path, 24_000)
       .then((peek) =>
         set((s) => ({
           nodes: s.nodes.map((n) =>
@@ -705,8 +1251,13 @@ export const useStore = create<State>((set, get) => ({
 
   removeNode: (id) =>
     set((s) => ({
-      nodes: s.nodes.filter((n) => n.id !== id),
-      edges: s.edges.filter((e) => e.source !== id && e.target !== id),
+      // Deleting a folder node takes its `cwd` edge with it, so the survivors
+      // need an heir promoted the same way detaching one does.
+      ...reconcileFolders(
+        s.nodes.filter((n) => n.id !== id),
+        s.edges,
+        s.edges.filter((e) => e.source !== id && e.target !== id),
+      ),
       selectedId: s.selectedId === id ? null : s.selectedId,
       // Drop the dock's pointer too. The panel already falls back to the
       // orchestrator, but leaving a dead id around invites confusion later.
@@ -804,8 +1355,10 @@ export const useStore = create<State>((set, get) => ({
     const d = node.data
 
     // 0. The folder node wired into this session is its working directory.
+    // Any others are extra roots it may read from — context, not a second cwd.
+    const roots = folderRootsFor(s.nodes, s.edges, nodeId)
     const cwd = resolveCwd(s.nodes, s.edges, nodeId)
-    if (!cwd) {
+    const noFolder = (text: string) =>
       set((st) => ({
         nodes: st.nodes.map((n) =>
           n.id === nodeId && isSession(n)
@@ -815,19 +1368,26 @@ export const useStore = create<State>((set, get) => ({
                   ...n.data,
                   messages: [
                     ...n.data.messages,
-                    {
-                      id: uid(),
-                      role: 'system' as const,
-                      text: 'No folder attached. Wire a folder node into this session to give it a working directory.',
-                      tools: [],
-                      error: true,
-                    },
+                    { id: uid(), role: 'system' as const, text, tools: [], error: true },
                   ],
                 },
               }
             : n,
         ) as GtNode[],
       }))
+
+    if (!cwd) {
+      noFolder(
+        'No folder attached. Wire a folder node into this session, or add one from the folder menu above the composer, to give it a working directory.',
+      )
+      return
+    }
+    // A missing working directory fails inside the spawn otherwise, where the
+    // error reads as a broken provider rather than a folder that has moved.
+    if (roots.find((r) => r.primary)?.missing) {
+      noFolder(
+        `Working directory not found: ${cwd}. Re-pick it on the folder node, or promote another folder from the folder menu.`,
+      )
       return
     }
 
@@ -858,20 +1418,35 @@ export const useStore = create<State>((set, get) => ({
       .map((e) => s.nodes.find((n) => n.id === e.source))
       .filter((n): n is GtNode & { type: 'file' } => !!n && isFile(n))
 
+    // A file already sent to this agent is in its history, unchanged on disk,
+    // and costs nothing to leave out — so only what is new or has actually
+    // been edited since is injected. The read goes through the shared cache,
+    // so a file wired into four agents is read from disk once.
     const fileBlocks: string[] = []
+    const sentFiles: Record<string, string> = {}
     let fileBudget = FILE_BUDGET_CHARS
     for (const f of attachedFiles) {
-      if (fileBudget <= 0) break
+      const path = f.data.path
+      const seen = d.sentFiles?.[path]
       try {
-        const peek = await readFileHead(f.data.path, Math.min(fileBudget, 24_000))
+        // Read even when the budget is spent: an unread file has no digest,
+        // and skipping it would make it look unchanged on the next turn.
+        const peek = await readShared(path, 24_000)
         if (peek.binary) continue
+        const stamp = digest(peek.text)
+        sentFiles[path] = stamp
+        if (stamp === seen) continue
+        if (fileBudget <= 0) continue
         const body = peek.text.slice(0, fileBudget)
         fileBudget -= body.length
+        const changed = seen ? ' changed="true"' : ''
         fileBlocks.push(
-          `<canvastrator-file path="${f.data.path}"${peek.truncated ? ' truncated="true"' : ''}>\n${body}\n</canvastrator-file>`,
+          `<canvastrator-file path="${path}"${changed}${peek.truncated ? ' truncated="true"' : ''}>\n${body}\n</canvastrator-file>`,
         )
       } catch {
-        fileBlocks.push(`<canvastrator-file path="${f.data.path}" error="unreadable" />`)
+        // No digest recorded: an unreadable file must be retried next turn
+        // rather than remembered as successfully sent.
+        fileBlocks.push(`<canvastrator-file path="${path}" error="unreadable" />`)
       }
     }
 
@@ -884,15 +1459,49 @@ export const useStore = create<State>((set, get) => ({
       const rules = globalRulesBlock(s.globalRules)
       if (rules) parts.push(rules)
     }
+    // How the rest of this conversation is put together, before any of it
+    // arrives. Every agent, not just orchestrators — they all now receive a
+    // setup that does not repeat itself.
+    if (!d.providerSessionId) parts.push(standingBlock())
     // This agent's standing brief, when it is new or has been edited since.
     const brief = (d.instructions ?? '').trim()
     const briefChanged = brief !== (d.sentInstructions ?? '').trim()
     if (brief && briefChanged) {
       parts.push(`<canvastrator-role>\n${brief}\n</canvastrator-role>`)
     }
+    // How a worker hands its result back. Once, on its opening turn — it is a
+    // standing instruction and the session's history keeps it.
+    if (d.role === 'worker' && !d.providerSessionId) {
+      parts.push(REPORT_INSTRUCTION)
+    }
+    // The folders this agent can reach. Sent when it is new and again whenever
+    // the set changes: folders are usually wired in after the conversation has
+    // started, and an agent told only at spawn would never hear about them.
+    const folderKey = folderSetKey(roots)
+    const sentFolderKey = d.sentFolders ?? ''
+    const foldersChanged = folderKey !== sentFolderKey
+    if (foldersChanged) {
+      const folders = canvasFoldersBlock(roots)
+      // Shrinking back to one folder renders as nothing, so the retraction has
+      // to be said explicitly; more than one extra was in the last key.
+      if (folders) parts.push(folders)
+      else if (sentFolderKey.includes('\n')) parts.push(canvasFoldersEndedBlock(roots))
+    }
 
     if (fileBlocks.length) {
       parts.push(fileBlocks.join('\n'))
+    }
+    // What everyone else on this canvas has already opened. Only the entries
+    // this agent has not been given: the map grows on most turns, and re-sending
+    // it whole would be the same waste in a different shape.
+    const known = filesKnown(s.nodes, s.edges, nodeId)
+    const knownKey = filesKnownKey(known)
+    const knownChanged = knownKey !== (d.sentFilesKnown ?? '')
+    if (knownChanged) {
+      const had = new Set((d.sentFilesKnown ?? '').split('\n'))
+      const freshFiles = known.filter((f) => !had.has(filesKnownEntry(f)))
+      const block = filesKnownBlock(freshFiles)
+      if (block) parts.push(block)
     }
     if (skills.length) {
       parts.push(
@@ -915,91 +1524,42 @@ export const useStore = create<State>((set, get) => ({
         `<canvastrator-context>\nSince your last turn, elsewhere on this canvas:\n\n${block}</canvastrator-context>`,
       )
     }
-    // 3b. Everything this session may instantiate: personality nodes wired
-    // into it, plus the persona library, which is available everywhere.
+    // 3b. Everything this session may instantiate: the persona library, which
+    // is available everywhere. Sent once — a resumed session still has it.
     const roster = rosterFor(s.library)
+    const mode = s.planning ? 'plan' : 'run'
+    const rKey = rosterKey(roster)
+    let sentOrchestrator = d.sentOrchestrator
+    let sentRoster = d.sentRoster
     if (d.role === 'orchestrator') {
-      const list = roster.length
-        ? roster
-            .map(
-              (p) =>
-                `- ${p.name} (${p.provider}${p.model ? `/${p.model}` : ''}${p.effort ? `, ${p.effort} effort` : ''}, ${p.permission}) — ${p.description}`,
-            )
-            .join('\n')
-        : '(none yet)'
-
-      // Planning mode changes what the orchestrator is for: it proposes the
-      // whole job and the user approves it, rather than starting the first
-      // piece of work it thinks of. The gate is enforced when the turn ends,
-      // so this is here to make the reply the right shape, not to hold the
-      // line on its own.
-      const planning = s.planning
-      const protocol = planning
-        ? [
-            'Canvastrator is in PLANNING MODE: you do not start work, you propose it. Set out the whole job as one line per step, in the order the steps should run:',
-            'PLAN <persona-name>: <the task, stated fully enough to act on without further context>',
-            '',
-            'A step ends at the end of its line, so keep each task on one line however long it is. Put any commentary of your own before the first PLAN line.',
-            '',
-            'Nothing runs until the user approves it, and they may edit a task, drop a step, or approve steps one at a time. So plan the whole job rather than only the first move, and make each step say enough to be judged on its own. Each step that runs reports back to you before the next one starts; if what comes back changes the plan, write new PLAN lines then.',
-            '',
-          ]
-        : [
-            'To run one, put this in your reply:',
-            'SPAWN <persona-name>: <the task, stated fully enough to act on without further context>',
-            '',
-            'The task may run over several paragraphs — everything after the colon belongs to it, to the end of your reply. So put any commentary of your own BEFORE the SPAWN line, never after it.',
-            '',
-          ]
-
-      parts.push(
-        [
-          '<canvastrator-orchestrator>',
-          'You are the orchestrator of a canvas of agents. Your job is to route work, not to perform it.',
-          '',
-          'Do the work yourself ONLY when it is trivial: a direct question about this conversation, a one-line clarification, or deciding what to do next. Anything that involves reading a codebase, writing or changing files, running commands, designing, reviewing, or research goes to a specialist — even when you could do it. A task you complete yourself is a task the user cannot see, re-run, or reassign.',
-          '',
-          'Available personas:',
-          list,
-          '',
-          ...protocol,
-          `If none of the available personas is a good fit, INVENT ONE FIRST. Do not force a bad fit, and do not fall back to doing it yourself. Define it with a fenced block, then ${planning ? 'use it in a step' : 'spawn it'} in the same reply:`,
-          '',
-          '```canvastrator-persona',
-          'name: api-designer',
-          'provider: claude',
-          `model: ${EXAMPLE_CLAUDE_MODEL}`,
-          'effort: high',
-          'permission: plan',
-          'description: Designs HTTP APIs and data contracts. Use before implementing an endpoint.',
-          '---',
-          'You design APIs. Produce the contract — routes, payloads, status codes, error shapes — and the reasoning behind it. Do not write implementation code.',
-          '```',
-          `${planning ? 'PLAN' : 'SPAWN'} api-designer: Design the /sessions endpoint for …`,
-          '',
-          'Choosing the fields:',
-          '- provider: claude, codex, or opencode.',
-          `- model: match the model to the work, using the mapping below — it is explicit, so never infer rank from the order of a list. Use one of the ids the chosen provider takes, or omit it to take the provider default.\n${MODEL_GUIDE}`,
-          '- effort: how hard it should think. low for mechanical passes, medium for ordinary implementation and review, high for architecture and hard debugging, xhigh or max only for genuinely difficult problems — they are slow and expensive. Omit it and the persona runs at medium.',
-          '- permission: plan for anything read-only (review, research, design), auto when it must edit files or run commands, full only when it genuinely needs an unsandboxed machine.',
-          '- description: when a future orchestrator should reach for this. It is the only thing routing sees, so make it specific.',
-          '',
-          'A persona you define is saved to the user\'s library and reusable on every canvas, so define it as a lasting role, not a one-off errand. Name it for the role, never for the specific task.',
-          '',
-          `If this turn carries a <canvas-global-rules> block, those rules are the user's and they bind you. They also bind everyone you spawn: Canvastrator gives each new agent the same block, and you must restate anything task-specific from it in the ${planning ? 'PLAN' : 'SPAWN'} text you write.`,
-          '</canvastrator-orchestrator>',
-        ].join('\n'),
-      )
+      if (d.sentOrchestrator !== mode) {
+        // New agent, or planning mode flipped under it: the protocol it is
+        // holding is the wrong one, so the whole brief goes again.
+        parts.push(orchestratorBlock(roster, s.planning))
+        sentOrchestrator = mode
+        sentRoster = rKey
+      } else if (d.sentRoster !== rKey) {
+        // Same protocol, different cast. Only the cast goes.
+        parts.push(rosterUpdateBlock(roster))
+        sentRoster = rKey
+      }
     }
+
     // Not offered while planning: everything an orchestrator sets in motion
     // goes through a step the user approved.
-    if (peers.length && d.role === 'orchestrator' && !s.planning) {
-      parts.push(
-        `<canvastrator-agents>\nOther agents you can delegate to:\n${peers
-          .map((p) => `- ${p.data.name} (${p.data.provider})`)
-          .join('\n')}\n\nTo delegate, put a line in your reply of exactly this form:\nDELEGATE <agent-name>: <the task>\nCanvastrator will run it on that agent and report back. Only delegate when it genuinely helps.\n</canvastrator-agents>`,
-      )
+    const peerList =
+      d.role === 'orchestrator' && !s.planning
+        ? peers.map((p) => ({ name: p.data.name, provider: p.data.provider }))
+        : []
+    const pKey = peerKey(peerList)
+    const peersChanged = pKey !== (d.sentPeers ?? '')
+    if (peersChanged) {
+      if (peerList.length) parts.push(peersBlock(peerList))
+      // Emptied while it still holds a list — but not merely because planning
+      // mode withdrew the protocol, which is not the peers going away.
+      else if (d.sentPeers && !s.planning) parts.push(peersEndedBlock())
     }
+
     parts.push(text)
     const prompt = parts.join('\n\n')
 
@@ -1018,6 +1578,15 @@ export const useStore = create<State>((set, get) => ({
                 state: 'thinking',
                 awaitingUser: false,
                 ...(briefChanged ? { sentInstructions: brief } : {}),
+                ...(foldersChanged ? { sentFolders: folderKey } : {}),
+                // Watermarks for everything that now goes only on change.
+                // Recorded together with the turn that carried them, so a
+                // send that never happened can't mark anything as delivered.
+                ...(sentOrchestrator !== d.sentOrchestrator ? { sentOrchestrator } : {}),
+                ...(sentRoster !== d.sentRoster ? { sentRoster } : {}),
+                ...(peersChanged ? { sentPeers: pKey } : {}),
+                ...(knownChanged ? { sentFilesKnown: knownKey } : {}),
+                sentFiles,
                 turnStartedAt: Date.now(),
                 messages: [...n.data.messages, userMsg, pending],
               },
@@ -1090,7 +1659,28 @@ export const useStore = create<State>((set, get) => ({
 
     switch (ev.kind) {
       case 'started':
-        patchNode((d) => ({ ...d, providerSessionId: ev.providerSessionId }))
+        patchNode((d) => {
+          // Every block that goes only once — the role, the folders, the
+          // orchestrator protocol, the files — is only safe to withhold
+          // because the provider is replaying this conversation. A provider
+          // that hands back a *different* id did not resume: it started a
+          // fresh one, and everything we are relying on it remembering is
+          // gone. So the watermarks are dropped and the next turn rebuilds
+          // the agent from nothing.
+          const lost = !!d.providerSessionId && d.providerSessionId !== ev.providerSessionId
+          if (!lost) return { ...d, providerSessionId: ev.providerSessionId }
+          return {
+            ...d,
+            providerSessionId: ev.providerSessionId,
+            sentInstructions: undefined,
+            sentFolders: undefined,
+            sentOrchestrator: undefined,
+            sentRoster: undefined,
+            sentPeers: undefined,
+            sentFilesKnown: undefined,
+            sentFiles: undefined,
+          }
+        })
         break
 
       case 'capabilities': {
@@ -1227,12 +1817,17 @@ export const useStore = create<State>((set, get) => ({
         // Publish this turn to the shared bus so downstream agents can see it.
         if (last?.text && !last.error) {
           const author = findSessionNode(get().nodes, sessionId)
+          // A worker's own REPORT block where it wrote one: it is the reply
+          // reduced by the agent that understood it, which beats the first 600
+          // characters of its reasoning — usually the part before it knew
+          // anything.
+          const summary = parseReport(last.text) ?? last.text
           const entry: ContextEntry = {
             id: uid(),
             sessionId,
             sessionName: author && isSession(author) ? author.data.name : sessionId,
             kind: 'summary',
-            body: last.text.replace(/\s+/g, ' ').slice(0, 600),
+            body: summary.replace(/\s+/g, ' ').slice(0, 600),
             ts: Date.now(),
           }
           set((s) => ({ bus: [...s.bus, entry] }))
@@ -1756,7 +2351,15 @@ async function spawnChild(
   let name = persona.name
   for (let i = 2; taken.has(name); i++) name = `${persona.name}-${i}`
 
-  const parentCwdEdge = st.edges.find((e) => e.target === fromNodeId && e.type === 'cwd')
+  // Every folder the parent reaches, not just its working directory — a worker
+  // spawned to work across two repos needs both, and each edge's type carries
+  // which one is primary.
+  const parentFolderEdges = st.edges.filter(
+    (e) =>
+      e.target === fromNodeId &&
+      (e.type === 'cwd' || e.type === 'attach') &&
+      st.nodes.some((n) => n.id === e.source && n.type === 'folder'),
+  )
 
   useStore.setState((s) => ({
     nodes: s.nodes.map((n) =>
@@ -1790,10 +2393,13 @@ async function spawnChild(
       // Context both ways: the child reports back, the parent can follow up.
       { id: `ctx_${uid()}`, source: childId, target: fromNodeId, type: 'context' },
       { id: `ctx_${uid()}`, source: fromNodeId, target: childId, type: 'context' },
-      // Same working directory as its parent, or it has nowhere to run.
-      ...(parentCwdEdge
-        ? [{ id: `cwd_${uid()}`, source: parentCwdEdge.source, target: childId, type: 'cwd' }]
-        : []),
+      // Same folders as its parent, primacy preserved, or it has nowhere to run.
+      ...parentFolderEdges.map((e) => ({
+        id: `${e.type}_${uid()}`,
+        source: e.source,
+        target: childId,
+        type: e.type,
+      })),
     ],
   }))
 
@@ -1805,15 +2411,15 @@ async function spawnChild(
 
   const done = useStore.getState().nodes.find((n) => n.id === childId)
   const answer = done && done.type === 'session' ? (done.data.messages.at(-1)?.text ?? '') : ''
-  if (answer) {
+  if (answer && done?.type === 'session') {
+    // The child's whole reply used to be spliced into the parent's context.
+    // It is written for the user — it reads files aloud and shows its working —
+    // so the parent paid for all of that to find the one paragraph it needed.
+    // Its REPORT block is what travels; the rest stays on the child's node.
+    handOver(parent.data.sessionId, done.data.sessionId)
     await useStore
       .getState()
-      .send(
-        fromNodeId,
-        name === persona.name
-          ? `${name} reported:\n\n${answer}`
-          : `${name} (a ${persona.name}) reported:\n\n${answer}`,
-      )
+      .send(fromNodeId, reportBlock(name, persona.name, handBack(answer)))
   }
   return { ok: true, childId }
 }
@@ -1925,9 +2531,33 @@ async function maybeDelegate(fromNodeId: string, text: string) {
   const done = useStore.getState().nodes.find((n) => n.id === target.id)
   const answer =
     done && done.type === 'session' ? (done.data.messages.at(-1)?.text ?? '') : ''
-  if (answer) {
+  if (answer && from.type === 'session' && done?.type === 'session') {
+    handOver(from.data.sessionId, done.data.sessionId)
     await useStore
       .getState()
-      .send(fromNodeId, `${targetName} completed the delegated task and reported:\n\n${answer}`)
+      .send(fromNodeId, reportBlock(done.data.name, 'delegate', handBack(answer)))
   }
+}
+
+/**
+ * Note that everything one agent has published has now reached another.
+ *
+ * A worker's reply lands on the shared bus *and* is handed straight back to
+ * whoever asked for it, and the two agents are joined by a context edge — so
+ * without this the parent received the same result twice: once as the report,
+ * and again in the next turn's context block. The bus is right to hold it,
+ * because a third agent watching this one has still not seen it; it is only
+ * this reader that is already holding it.
+ */
+function handOver(toSessionId: string, fromSessionId: string) {
+  useStore.setState((s) => {
+    const mine = s.bus.filter((e) => e.sessionId === fromSessionId).map((e) => e.id)
+    if (!mine.length) return s
+    return {
+      delivered: {
+        ...s.delivered,
+        [toSessionId]: new Set([...(s.delivered[toSessionId] ?? []), ...mine]),
+      },
+    }
+  })
 }

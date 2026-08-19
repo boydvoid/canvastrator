@@ -7,11 +7,20 @@ import { basename, useStore, type GtNode } from '@/lib/store'
 import type { FolderNodeData } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
+/** " session" / " sessions" — the noun only appears on the last count. */
+const plural = (n: number) => ` session${n > 1 ? 's' : ''}`
+
 function FolderNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'folder' }>) {
   const d = data as FolderNodeData
   const removeNode = useStore((s) => s.removeNode)
-  const sessionCount = useStore(
+  // A folder may be one session's working directory and another's extra root
+  // at the same time — primacy is a property of the edge, not the folder — so
+  // the footer counts both and names each role.
+  const cwdCount = useStore(
     (s) => s.edges.filter((e) => e.source === id && e.type === 'cwd').length,
+  )
+  const attachCount = useStore(
+    (s) => s.edges.filter((e) => e.source === id && e.type === 'attach').length,
   )
 
   const rechoose = async () => {
@@ -34,8 +43,17 @@ function FolderNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'fol
         d.missing && 'border-[var(--color-danger)]',
       )}
     >
-      {/* A folder feeds sessions; it never receives. */}
-      <Handle type="source" position={Position.Right} id="cwd-out" />
+      {/* A folder feeds sessions; it never receives. One handle for both
+          roles: the first folder wired into a session becomes its working
+          directory and the rest are extra roots, so which of the two an edge
+          is depends on the session it lands on, not on where it was dragged
+          from. */}
+      <Handle
+        type="source"
+        position={Position.Right}
+        id="cwd-out"
+        title="Drag onto a session — the first folder is its working directory, the rest are extra roots"
+      />
 
       <div className="flex items-center gap-2 px-2.5 py-2">
         {d.missing ? (
@@ -59,9 +77,14 @@ function FolderNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'fol
       </div>
 
       <div className="border-t border-line-soft px-2.5 py-1 font-mono text-[10px] text-fg-faint">
-        {sessionCount === 0
+        {cwdCount === 0 && attachCount === 0
           ? 'wire into a session to set its cwd'
-          : `cwd for ${sessionCount} session${sessionCount > 1 ? 's' : ''}`}
+          : [
+              cwdCount ? `cwd for ${cwdCount}${attachCount ? '' : plural(cwdCount)}` : null,
+              attachCount ? `reachable by ${attachCount}${plural(attachCount)}` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
       </div>
     </div>
   )
