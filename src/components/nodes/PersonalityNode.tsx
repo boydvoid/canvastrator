@@ -101,13 +101,6 @@ function PersonalityNodeInner({ id, data, selected }: NodeProps<GtNode & { type:
           onChange={(model) => update(id, { model })}
         />
 
-        <input
-          value={d.model ?? ''}
-          onChange={(e) => update(id, { model: e.target.value || undefined })}
-          placeholder="model (opus / sonnet / haiku — blank for default)"
-          className="w-full bg-transparent font-mono text-[10.5px] text-fg-subtle outline-none placeholder:text-fg-faint"
-        />
-
         <EffortField value={d.effort} onChange={(effort) => update(id, { effort })} />
 
         <div className="flex gap-1">

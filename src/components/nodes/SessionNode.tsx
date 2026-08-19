@@ -19,6 +19,7 @@ import {
   PERMISSION_LABEL,
   PROVIDER_ACCENT,
   PROVIDER_LABEL,
+  modelLabel,
   type Message,
   type Permission,
   type SessionNodeData,
@@ -358,7 +359,7 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
               className="shrink-0 truncate font-mono text-[10px] text-fg-faint"
               title={`Running on ${d.model}`}
             >
-              {d.model}
+              {modelLabel(d.provider, d.model)}
             </span>
           )}
           <span className="ml-auto shrink-0 font-mono text-[10px] text-fg-faint">

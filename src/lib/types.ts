@@ -39,22 +39,98 @@ export const EFFORT_HINT: Record<Effort, string> = {
   max: 'Everything it has. Expensive — reserve for genuinely hard problems.',
 }
 
+/** One selectable model: what the user reads, and what the CLI is sent. */
+export type ModelOption = {
+  /** Exactly the string handed to the CLI's `--model` flag. */
+  id: string
+  /** Human-readable name, shown instead of the id. */
+  label: string
+  /**
+   * Roughly what this model is for: `heavy` for hard reasoning, `mid` for
+   * ordinary implementation, `light` for cheap mechanical passes. Omitted
+   * when the model has no honest place in that ordering — an opencode id
+   * from a vendor we cannot rank against the others, say. Readers must cope
+   * with it being unset rather than assume list order means anything.
+   */
+  tier?: 'heavy' | 'mid' | 'light'
+  /** Short note on a model whose character the tier does not capture. */
+  note?: string
+}
+
 /**
- * Model suggestions per provider. Every CLI takes `--model <string>` and the
- * set of models moves far faster than this app does, so the field is free
- * text — these are one-click shortcuts, never the whole list.
+ * The models offered per provider — the one place they are defined. Every
+ * picker, persona editor and default-resolution path reads from here.
+ *
+ * These are the ids each CLI is known to accept, but the field stays free
+ * text: all three providers take `--model <string>` and pass it through, and
+ * the set of models moves faster than this app ships. Unset is always
+ * available and always the default — it means "whatever the CLI defaults to",
+ * which follows the user's own provider config.
  */
-export const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
-  claude: ['opus', 'sonnet', 'haiku'],
-  codex: [],
-  opencode: [],
+export const MODEL_OPTIONS: Record<Provider, ModelOption[]> = {
+  // `claude --help`: an alias for the latest model, or a full model name.
+  // Full names, so a persona keeps running on the model it was written for.
+  claude: [
+    {
+      id: 'claude-fable-5',
+      label: 'Fable 5',
+      note: 'built for creative and natural-language work, not raw reasoning depth',
+    },
+    { id: 'claude-opus-5', label: 'Opus 5', tier: 'heavy' },
+    { id: 'claude-sonnet-5', label: 'Sonnet 5', tier: 'mid' },
+    { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', tier: 'light' },
+  ],
+  // The two presets the codex CLI ships with. It forwards anything else
+  // straight to the API, which is why the field is not a closed list.
+  codex: [
+    { id: 'gpt-5', label: 'GPT-5', tier: 'heavy' },
+    {
+      id: 'gpt-5-codex',
+      label: 'GPT-5 Codex',
+      tier: 'heavy',
+      note: 'the same size as gpt-5, tuned for coding and agentic edits',
+    },
+  ],
+  // opencode names models `provider/model`, and which providers exist depends
+  // on the user's own config — `opencode models` is the authority. These are
+  // the flagships of the provider it ships signed in to.
+  opencode: [
+    {
+      id: 'opencode/claude-fable-5',
+      label: 'Fable 5',
+      note: 'built for creative and natural-language work, not raw reasoning depth',
+    },
+    { id: 'opencode/claude-opus-5', label: 'Opus 5', tier: 'heavy' },
+    { id: 'opencode/claude-sonnet-5', label: 'Sonnet 5', tier: 'mid' },
+    { id: 'opencode/claude-haiku-4-5', label: 'Haiku 4.5', tier: 'light' },
+    { id: 'opencode/gpt-5.5', label: 'GPT-5.5', tier: 'heavy' },
+    {
+      id: 'opencode/gpt-5.3-codex',
+      label: 'GPT-5.3 Codex',
+      tier: 'heavy',
+      note: 'tuned for coding and agentic edits',
+    },
+    { id: 'opencode/gemini-3.1-pro', label: 'Gemini 3.1 Pro', tier: 'heavy' },
+    // No tier: xAI's flagship, but we have no honest basis for ranking it
+    // against the Anthropic, OpenAI and Google entries above it.
+    { id: 'opencode/grok-4.6', label: 'Grok 4.6', note: "xAI's flagship" },
+  ],
 }
 
 /** What to type here, per provider. Shown when the field is empty. */
 export const MODEL_HINT: Record<Provider, string> = {
-  claude: 'opus · sonnet · haiku, or a full model id',
-  codex: 'a model id your codex CLI accepts',
-  opencode: 'a model as your opencode config names it',
+  claude: 'a model id or alias, e.g. opus — blank for the CLI default',
+  codex: 'a model id your codex CLI accepts — blank for the CLI default',
+  opencode: 'provider/model, as `opencode models` lists it — blank for default',
+}
+
+/**
+ * The label for a model id, falling back to the id for anything unlisted —
+ * including a provider we have no options for, which persisted canvases from
+ * an older build can still carry.
+ */
+export function modelLabel(provider: Provider, id: string): string {
+  return (MODEL_OPTIONS[provider] ?? []).find((m) => m.id === id)?.label ?? id
 }
 
 export type SessionState =

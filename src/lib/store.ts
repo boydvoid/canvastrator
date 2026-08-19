@@ -22,6 +22,9 @@ import {
   STARTER_PERSONAS,
   type Persona,
 } from './library'
+import {
+  MODEL_OPTIONS,
+} from './types'
 import type {
   AgentEvent,
   ContextEntry,
@@ -32,6 +35,7 @@ import type {
   McpServer,
   McpToolNodeData,
   Message,
+  ModelOption,
   PersonalityNodeData,
   Permission,
   Provider,
@@ -303,6 +307,53 @@ export function resolveCwd(nodes: GtNode[], edges: Edge[], sessionNodeId: string
 function findSessionNode(nodes: GtNode[], sessionId: string) {
   return nodes.find((n) => isSession(n) && n.data.sessionId === sessionId)
 }
+
+/** What each tier is for, spelled out rather than left to be inferred. */
+const TIER_USE = {
+  heavy: 'hard reasoning, architecture and gnarly debugging',
+  mid: 'ordinary implementation and review',
+  light: 'cheap mechanical passes',
+} as const
+
+const withNote = (m: ModelOption) => (m.note ? `${m.id} (${m.note})` : m.id)
+
+/**
+ * The models the orchestrator may name in a persona it invents, taken from
+ * MODEL_OPTIONS so the brief can never drift from what the pickers offer.
+ *
+ * Grouped by tier and captioned with what that tier is for, because list
+ * order carries no rank: an id sitting first is not the biggest model, and an
+ * orchestrator told to pick "the biggest" would otherwise guess. Models with
+ * no tier are listed separately with their note rather than dropped.
+ */
+const MODEL_GUIDE = (Object.keys(MODEL_OPTIONS) as Provider[])
+  .map((p) => {
+    const opts = MODEL_OPTIONS[p]
+    const groups = (['heavy', 'mid', 'light'] as const)
+      .map((t) => {
+        const ms = opts.filter((m) => m.tier === t)
+        return ms.length ? `${TIER_USE[t]} — ${ms.map(withNote).join(' or ')}` : null
+      })
+      .filter((g): g is string => g !== null)
+    const untiered = opts.filter((m) => !m.tier)
+    if (untiered.length)
+      groups.push(
+        `no place in that ordering, pick it only when its note fits the work — ${untiered
+          .map(withNote)
+          .join('; ')}`,
+      )
+    return `  - ${p}: ${groups.join('; ')}.`
+  })
+  .join('\n')
+
+/**
+ * The model shown in the worked example — the claude one built for reasoning.
+ * Matched on the id, not the label: labels are presentation and may be
+ * reworded, and a silent fall through to a different model would change the
+ * example the orchestrator copies.
+ */
+const EXAMPLE_CLAUDE_MODEL =
+  MODEL_OPTIONS.claude.find((m) => m.id === 'claude-opus-5')?.id ?? MODEL_OPTIONS.claude[0].id
 
 export const useStore = create<State>((set, get) => ({
   nodes: [],
@@ -853,7 +904,7 @@ export const useStore = create<State>((set, get) => ({
           '```canvastrator-persona',
           'name: api-designer',
           'provider: claude',
-          'model: opus',
+          `model: ${EXAMPLE_CLAUDE_MODEL}`,
           'effort: high',
           'permission: plan',
           'description: Designs HTTP APIs and data contracts. Use before implementing an endpoint.',
@@ -864,7 +915,7 @@ export const useStore = create<State>((set, get) => ({
           '',
           'Choosing the fields:',
           '- provider: claude, codex, or opencode.',
-          '- model: match the model to the work. Use opus for hard reasoning, architecture, and gnarly debugging; sonnet for ordinary implementation and review; haiku for cheap mechanical passes. Omit it to take the provider default.',
+          `- model: match the model to the work, using the mapping below — it is explicit, so never infer rank from the order of a list. Use one of the ids the chosen provider takes, or omit it to take the provider default.\n${MODEL_GUIDE}`,
           '- effort: how hard it should think. low for mechanical passes, medium for ordinary implementation and review, high for architecture and hard debugging, xhigh or max only for genuinely difficult problems — they are slow and expensive. Omit it and the persona runs at medium.',
           '- permission: plan for anything read-only (review, research, design), auto when it must edit files or run commands, full only when it genuinely needs an unsandboxed machine.',
           '- description: when a future orchestrator should reach for this. It is the only thing routing sees, so make it specific.',

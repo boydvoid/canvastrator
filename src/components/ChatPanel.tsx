@@ -15,21 +15,15 @@ import { canvasFilesFor, resolveCwd, searchRootsFor, useStore, type GtNode } fro
 import {
   EFFORTS,
   EFFORT_HINT,
+  MODEL_OPTIONS,
+  modelLabel,
   PERMISSION_LABEL,
   PROVIDER_ACCENT,
   PROVIDER_LABEL,
   type Message,
   type Permission,
-  type Provider,
 } from '@/lib/types'
 import { cn } from '@/lib/utils'
-
-/** Model shorthands worth one click. Anything else goes in via Custom. */
-const MODEL_PRESETS: Record<Provider, string[]> = {
-  claude: ['opus', 'sonnet', 'haiku'],
-  codex: ['gpt-5.1-codex', 'o3'],
-  opencode: [],
-}
 
 const PERMISSIONS: Permission[] = ['plan', 'auto', 'full']
 
@@ -89,7 +83,7 @@ function Bubble({ msg, accent }: { msg: Message; accent: string }) {
 function ModelMenu({ node }: { node: GtNode & { type: 'session' } }) {
   const setModel = useStore((s) => s.setModel)
   const [custom, setCustom] = useState(false)
-  const presets = MODEL_PRESETS[node.data.provider]
+  const options = MODEL_OPTIONS[node.data.provider]
 
   if (custom) {
     return (
@@ -117,7 +111,7 @@ function ModelMenu({ node }: { node: GtNode & { type: 'session' } }) {
           className="rounded px-1.5 py-0.5 font-mono text-[10px] text-fg-subtle hover:bg-surface hover:text-fg-muted"
           title="Model for this session"
         >
-          {node.data.model ?? 'default'} ▾
+          {node.data.model ? modelLabel(node.data.provider, node.data.model) : 'default'} ▾
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
@@ -125,9 +119,9 @@ function ModelMenu({ node }: { node: GtNode & { type: 'session' } }) {
         <DropdownMenuItem onSelect={() => setModel(node.id, undefined)}>
           default ({PROVIDER_LABEL[node.data.provider]})
         </DropdownMenuItem>
-        {presets.map((m) => (
-          <DropdownMenuItem key={m} onSelect={() => setModel(node.id, m)}>
-            {m}
+        {options.map((m) => (
+          <DropdownMenuItem key={m.id} onSelect={() => setModel(node.id, m.id)} title={m.id}>
+            {m.label}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
