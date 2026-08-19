@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { CircleAlert, Hexagon, Loader2 } from 'lucide-react'
 import { resolveCwd, useStore, type GtNode } from '@/lib/store'
@@ -6,16 +6,69 @@ import { PROVIDER_ACCENT, PROVIDER_LABEL, type SessionNodeData } from '@/lib/typ
 import { cn } from '@/lib/utils'
 
 /**
- * An agent on the canvas, and nothing more.
+ * The tail of what the agent is saying, live.
  *
- * The transcript used to live here, which made every node a window that had to
- * be big enough to read and left the graph unreadable at any zoom that showed
- * more than three agents. The conversation and every setting now live in the
- * right dock; a node says who this agent is, whether it is working, and
- * whether it wants you — and clicking it points the dock at it.
+ * Not the transcript — that lived on the node once and made every node a
+ * window big enough to read, which is what left the graph unreadable. This is
+ * two lines of the newest reply, scrolled to the end, so a canvas of working
+ * agents shows what each of them is actually doing without opening anything.
+ * Reading the whole thing is still the dock's job.
+ */
+function StreamWindow({ text, streaming, accent, notice }: {
+  text: string
+  streaming: boolean
+  accent: string
+  notice?: string
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  // Follow the stream. No stick-on-scroll here — the window is two lines tall
+  // and not something you read by scrolling; that's what the dock is for.
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [text])
+
+  if (!text) {
+    return (
+      <div className="h-[26px] overflow-hidden font-mono text-[10px] leading-[13px] text-fg-faint">
+        {streaming ? (notice ?? 'thinking…') : ''}
+      </div>
+    )
+  }
+
+  return (
+    <div
+      ref={ref}
+      className="h-[26px] overflow-hidden font-mono text-[10px] leading-[13px] break-words whitespace-pre-wrap text-fg-muted"
+    >
+      {text}
+      {streaming && (
+        <span
+          className="gt-caret ml-0.5 inline-block h-[9px] w-[5px] translate-y-[1px]"
+          style={{ background: accent }}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * An agent on the canvas: who it is, whether it is working, and the tail of
+ * what it is saying.
+ *
+ * The full transcript used to live here, which made every node a window that
+ * had to be big enough to read and left the graph unreadable at any zoom that
+ * showed more than three agents. The conversation and every setting now live
+ * in the right dock; clicking a node points the dock at it.
  */
 function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'session' }>) {
   const d = data as SessionNodeData
+  // Steps this agent proposed that are still waiting on the user. A plan is
+  // the loudest thing on a canvas — nothing is running because of it.
+  const awaitingApproval = useStore((s) =>
+    s.plan?.fromNodeId === id ? s.plan.steps.filter((st) => st.state === 'pending').length : 0,
+  )
   // cwd comes from the graph, not from node state — the wiring is the truth.
   const cwd = useStore((s) => resolveCwd(s.nodes, s.edges, id))
   // Which conversation the dock is showing, so the two are visibly the same
@@ -30,6 +83,16 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
   const accent = PROVIDER_ACCENT[d.provider]
   const busy = d.state === 'thinking' || d.state === 'streaming'
 
+  // The newest thing the agent said. Markdown is left as it was typed: at ten
+  // pixels the punctuation is texture, and parsing it per node per token is
+  // work for a window nobody reads word by word.
+  const tail = useMemo(() => {
+    const last = [...d.messages].reverse().find((m) => m.role === 'assistant' && m.text)
+    // Enough to fill the window a few times over, so the scroll-to-end lands
+    // mid-sentence rather than on a stale line.
+    return last ? last.text.slice(-400) : ''
+  }, [d.messages])
+
   const [flash, setFlash] = useState(false)
   useEffect(() => {
     if (!d.firedAt) return
@@ -41,7 +104,7 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
   return (
     <div
       className={cn(
-        'gt-spawn flex h-full w-full cursor-pointer flex-col justify-center gap-0.5 overflow-hidden rounded-xl border bg-panel/90 px-3 py-2 backdrop-blur transition-colors',
+        'gt-spawn flex h-full w-full cursor-pointer flex-col gap-0.5 overflow-hidden rounded-xl border bg-panel/90 px-3 py-2 backdrop-blur transition-colors',
         selected || inDock ? 'border-line-strongest' : 'border-line',
         busy && 'gt-thinking',
         flash && 'gt-firing',
@@ -77,6 +140,18 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
           className="shrink-0"
         />
         <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-fg">{d.name}</span>
+        {awaitingApproval > 0 && !busy && (
+          <span
+            className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[9.5px]"
+            style={{
+              background: 'color-mix(in oklch, var(--color-claude) 20%, transparent)',
+              color: 'var(--color-claude)',
+            }}
+            title={`${awaitingApproval} step${awaitingApproval > 1 ? 's' : ''} waiting for your approval`}
+          >
+            plan {awaitingApproval}
+          </span>
+        )}
         {busy ? (
           <Loader2 size={12} className="shrink-0 animate-spin" style={{ color: accent }} />
         ) : d.state === 'error' ? (
@@ -97,6 +172,17 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
         </span>
         {busy && <span className="ml-auto shrink-0" style={{ color: accent }}>{d.state}</span>}
         {!busy && d.state === 'dead' && <span className="ml-auto shrink-0">dead</span>}
+      </div>
+
+      {/* Pointer-events off: the window is something to glance at, and a click
+          anywhere on the node belongs to the node. */}
+      <div className="pointer-events-none mt-1 border-t border-line-soft pt-1">
+        <StreamWindow
+          text={tail}
+          streaming={busy}
+          accent={accent}
+          notice={d.notice?.label}
+        />
       </div>
     </div>
   )

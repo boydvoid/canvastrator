@@ -183,6 +183,39 @@ export type Message = {
   error?: boolean
 }
 
+/**
+ * One step of a plan: a persona, and what it should be asked to do.
+ *
+ * A step is a spawn that hasn't happened yet. It carries the id of the agent
+ * it became so the plan can say what came of it after the fact, rather than
+ * vanishing the moment it runs.
+ */
+export type PlanStep = {
+  id: string
+  persona: string
+  task: string
+  state: 'pending' | 'running' | 'done' | 'failed'
+  /** The agent this step spawned, once it has run. */
+  childId?: string
+  /** Why it failed — an unknown persona, a limit, a dead provider. */
+  error?: string
+}
+
+/**
+ * Work the orchestrator proposed and the user hasn't agreed to yet.
+ *
+ * One plan at a time per canvas: a plan is the answer to "what are we doing",
+ * and two of them competing is the state this is meant to prevent.
+ */
+export type Plan = {
+  /** The orchestrator that wrote it. */
+  fromNodeId: string
+  /** What was asked for, so the plan still makes sense hours later. */
+  goal: string
+  steps: PlanStep[]
+  proposedAt: number
+}
+
 export type SessionNodeData = {
   sessionId: string
   provider: Provider

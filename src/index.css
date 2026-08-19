@@ -166,11 +166,12 @@ body {
 .react-flow__node {
   cursor: default;
 }
-/* An agent node is a label, not a window. Pinned here as well as on the node
-   so a canvas saved before the size existed opens at the right one. */
+/* An agent node is a label with a two-line stream window under it. Pinned here
+   as well as on the node so a canvas saved before the size existed opens at
+   the right one. */
 .react-flow__node-session {
   width: 260px;
-  height: 64px;
+  height: 106px;
 }
 /* Files are chips. Sized here rather than on each node so the layout's idea of
    a file's box and the rendered box can't drift apart. */

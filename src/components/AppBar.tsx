@@ -27,6 +27,8 @@ export function AppBar({
   const nodes = useStore((s) => s.nodes)
   const bus = useStore((s) => s.bus)
   const autoTidy = useStore((s) => s.autoTidy)
+  const planning = useStore((s) => s.planning)
+  const togglePlanning = useStore((s) => s.togglePlanning)
   const toggleAutoTidy = useStore((s) => s.toggleAutoTidy)
 
   const folders = nodes.filter((n) => n.type === 'folder').length
@@ -118,6 +120,20 @@ export function AppBar({
           title="Tidy the canvas  ⇧⌘L"
         >
           tidy
+        </button>
+        <button
+          onClick={togglePlanning}
+          className={cn(
+            'rounded px-1.5 py-0.5 font-mono text-[11px] hover:bg-surface hover:text-fg',
+            planning ? 'text-fg' : 'text-fg-muted',
+          )}
+          title={
+            planning
+              ? 'Planning is on: the orchestrator proposes the work and nothing runs until you approve it. Click to let it run on its own.'
+              : 'Planning is off: the orchestrator spawns agents as soon as it decides to. Click to make it propose first.'
+          }
+        >
+          {planning ? 'planning' : 'auto-run'}
         </button>
         <button
           onClick={toggleAutoTidy}

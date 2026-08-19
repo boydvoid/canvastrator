@@ -37,6 +37,8 @@ const snapshot = (nodes: GtNode[], edges: Edge[] = []) => ({
   autoPlaced: new Set<string>(),
   globalRules: '',
   notifications: [],
+  planning: true,
+  plan: null,
 })
 
 describe('serializeCanvas', () => {
@@ -158,5 +160,43 @@ describe('deserializeCanvas', () => {
       edges: [{ id: 'e1', source: 'a', target: 'ghost' }],
     } as unknown as CanvasData
     expect(deserializeCanvas(data).edges).toEqual([])
+  })
+})
+
+describe('plans across a save', () => {
+  const plan = {
+    fromNodeId: 'a',
+    goal: 'ship the export button',
+    proposedAt: 1,
+    steps: [
+      { id: 's1', persona: 'investigator', task: 'look', state: 'done' as const, childId: 'b' },
+      { id: 's2', persona: 'implementer', task: 'write', state: 'running' as const },
+      { id: 's3', persona: 'reviewer', task: 'check', state: 'pending' as const },
+    ],
+  }
+
+  /** The agent a running step was waiting on died with the process. Leaving
+   *  the step "running" for ever is worse than approving it twice. */
+  it('reopens a step that was in flight when the app closed', () => {
+    const saved = serializeCanvas({ ...snapshot([session('a')]), plan })
+    expect(saved.plan?.steps.map((s) => s.state)).toEqual(['done', 'pending', 'pending'])
+    const back = deserializeCanvas(saved)
+    expect(back.plan?.steps.map((s) => s.state)).toEqual(['done', 'pending', 'pending'])
+    expect(back.plan?.steps[0].childId).toBe('b')
+    expect(back.plan?.goal).toBe('ship the export button')
+  })
+
+  it('keeps planning on for a canvas saved before it existed', () => {
+    const back = deserializeCanvas({ ...serializeCanvas(snapshot([])), planning: undefined })
+    expect(back.planning).toBe(true)
+    expect(back.plan).toBeNull()
+  })
+
+  it('survives a canvas whose plan is junk', () => {
+    const back = deserializeCanvas({
+      ...serializeCanvas(snapshot([])),
+      plan: { fromNodeId: 'a', goal: '', proposedAt: 0, steps: [] },
+    })
+    expect(back.plan).toBeNull()
   })
 })

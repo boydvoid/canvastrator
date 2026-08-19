@@ -13,6 +13,7 @@ import { dirExists, fileExists, interruptSession, readFileHead, sendTurn } from 
 import { looksLikeQuestion } from './asking'
 import { boxOf, FILE_SIZE, findFreeSpot, layoutCanvas, SESSION_SIZE, sizeOf } from './layout'
 import { parsePersonaDefinitions } from './persona-parse'
+import { nextStep, parsePlan, planLive } from './plan'
 import { summarizeTurn } from './summary'
 import {
   dedupeByName,
@@ -36,6 +37,8 @@ import type {
   Message,
   ModelOption,
   Permission,
+  Plan,
+  PlanStep,
   Provider,
   ProviderStatus,
   SessionNodeData,
@@ -147,6 +150,22 @@ type State = {
   /** Hand a node back to the user — called when they drag it. */
   claimNode: (id: string) => void
   toggleAutoTidy: () => void
+
+  /**
+   * Planning mode. On, an orchestrator proposes the work and nothing runs
+   * until the user approves it; off, it spawns as soon as it decides to.
+   */
+  planning: boolean
+  togglePlanning: () => void
+  /** The plan waiting on the user, if there is one. */
+  plan: Plan | null
+  editPlanStep: (stepId: string, task: string) => void
+  removePlanStep: (stepId: string) => void
+  discardPlan: () => void
+  /** Run one step now. Resolves when the agent it spawns has finished. */
+  approvePlanStep: (stepId: string) => Promise<void>
+  /** Run every step still pending, in order. */
+  approvePlan: () => Promise<void>
   updateSkill: (nodeId: string, patch: Partial<SkillNodeData>) => void
   removeNode: (id: string) => void
   renameSession: (nodeId: string, name: string) => void
@@ -349,6 +368,10 @@ export const useStore = create<State>((set, get) => ({
   rightTab: 'chat',
   chatTarget: null,
   autoTidy: true,
+  // On by default. An orchestrator that spawns the moment it has an idea is
+  // the behaviour this exists to make optional, not the one to default to.
+  planning: true,
+  plan: null,
   autoPlaced: new Set<string>(),
   notifications: [],
   queued: {},
@@ -532,6 +555,50 @@ export const useStore = create<State>((set, get) => ({
 
   toggleLibrary: () => set((s) => ({ libraryOpen: !s.libraryOpen })),
   toggleAutoTidy: () => set((s) => ({ autoTidy: !s.autoTidy })),
+
+  togglePlanning: () => set((s) => ({ planning: !s.planning })),
+
+  editPlanStep: (stepId, task) =>
+    set((s) =>
+      s.plan
+        ? {
+            plan: {
+              ...s.plan,
+              steps: s.plan.steps.map((st) => (st.id === stepId ? { ...st, task } : st)),
+            },
+          }
+        : s,
+    ),
+
+  removePlanStep: (stepId) =>
+    set((s) => {
+      if (!s.plan) return s
+      const steps = s.plan.steps.filter((st) => st.id !== stepId)
+      // A plan with every step struck out is a discarded plan.
+      return { plan: steps.length ? { ...s.plan, steps } : null }
+    }),
+
+  discardPlan: () => set({ plan: null }),
+
+  approvePlanStep: async (stepId) => {
+    const plan = get().plan
+    const step = plan?.steps.find((x) => x.id === stepId)
+    if (!plan || !step || step.state !== 'pending') return
+    await runPlanStep(plan.fromNodeId, stepId)
+  },
+
+  approvePlan: async () => {
+    // One at a time, in order. The steps of a plan are a sequence — a reviewer
+    // reads what the implementer wrote — and running them at once would hand
+    // every one of them the state from before any of them ran.
+    for (;;) {
+      const plan = get().plan
+      if (!plan) return
+      const step = nextStep(plan.steps)
+      if (!step) return
+      await runPlanStep(plan.fromNodeId, step.id)
+    }
+  },
 
   claimNode: (id) =>
     set((s) => {
@@ -861,6 +928,30 @@ export const useStore = create<State>((set, get) => ({
             .join('\n')
         : '(none yet)'
 
+      // Planning mode changes what the orchestrator is for: it proposes the
+      // whole job and the user approves it, rather than starting the first
+      // piece of work it thinks of. The gate is enforced when the turn ends,
+      // so this is here to make the reply the right shape, not to hold the
+      // line on its own.
+      const planning = s.planning
+      const protocol = planning
+        ? [
+            'Canvastrator is in PLANNING MODE: you do not start work, you propose it. Set out the whole job as one line per step, in the order the steps should run:',
+            'PLAN <persona-name>: <the task, stated fully enough to act on without further context>',
+            '',
+            'A step ends at the end of its line, so keep each task on one line however long it is. Put any commentary of your own before the first PLAN line.',
+            '',
+            'Nothing runs until the user approves it, and they may edit a task, drop a step, or approve steps one at a time. So plan the whole job rather than only the first move, and make each step say enough to be judged on its own. Each step that runs reports back to you before the next one starts; if what comes back changes the plan, write new PLAN lines then.',
+            '',
+          ]
+        : [
+            'To run one, put this in your reply:',
+            'SPAWN <persona-name>: <the task, stated fully enough to act on without further context>',
+            '',
+            'The task may run over several paragraphs — everything after the colon belongs to it, to the end of your reply. So put any commentary of your own BEFORE the SPAWN line, never after it.',
+            '',
+          ]
+
       parts.push(
         [
           '<canvastrator-orchestrator>',
@@ -871,12 +962,8 @@ export const useStore = create<State>((set, get) => ({
           'Available personas:',
           list,
           '',
-          'To run one, put this in your reply:',
-          'SPAWN <persona-name>: <the task, stated fully enough to act on without further context>',
-          '',
-          'The task may run over several paragraphs — everything after the colon belongs to it, to the end of your reply. So put any commentary of your own BEFORE the SPAWN line, never after it.',
-          '',
-          'If none of the available personas is a good fit, INVENT ONE FIRST. Do not force a bad fit, and do not fall back to doing it yourself. Define it with a fenced block, then spawn it in the same reply:',
+          ...protocol,
+          `If none of the available personas is a good fit, INVENT ONE FIRST. Do not force a bad fit, and do not fall back to doing it yourself. Define it with a fenced block, then ${planning ? 'use it in a step' : 'spawn it'} in the same reply:`,
           '',
           '```canvastrator-persona',
           'name: api-designer',
@@ -888,7 +975,7 @@ export const useStore = create<State>((set, get) => ({
           '---',
           'You design APIs. Produce the contract — routes, payloads, status codes, error shapes — and the reasoning behind it. Do not write implementation code.',
           '```',
-          'SPAWN api-designer: Design the /sessions endpoint for …',
+          `${planning ? 'PLAN' : 'SPAWN'} api-designer: Design the /sessions endpoint for …`,
           '',
           'Choosing the fields:',
           '- provider: claude, codex, or opencode.',
@@ -899,12 +986,14 @@ export const useStore = create<State>((set, get) => ({
           '',
           'A persona you define is saved to the user\'s library and reusable on every canvas, so define it as a lasting role, not a one-off errand. Name it for the role, never for the specific task.',
           '',
-          'If this turn carries a <canvas-global-rules> block, those rules are the user\'s and they bind you. They also bind everyone you spawn: Canvastrator gives each new agent the same block, and you must restate anything task-specific from it in the SPAWN text you write.',
+          `If this turn carries a <canvas-global-rules> block, those rules are the user's and they bind you. They also bind everyone you spawn: Canvastrator gives each new agent the same block, and you must restate anything task-specific from it in the ${planning ? 'PLAN' : 'SPAWN'} text you write.`,
           '</canvastrator-orchestrator>',
         ].join('\n'),
       )
     }
-    if (peers.length && d.role === 'orchestrator') {
+    // Not offered while planning: everything an orchestrator sets in motion
+    // goes through a step the user approved.
+    if (peers.length && d.role === 'orchestrator' && !s.planning) {
       parts.push(
         `<canvastrator-agents>\nOther agents you can delegate to:\n${peers
           .map((p) => `- ${p.data.name} (${p.data.provider})`)
@@ -1153,8 +1242,22 @@ export const useStore = create<State>((set, get) => ({
           // Definitions first: a reply can invent a persona and spawn it in
           // the same breath, and the spawn resolves against the library.
           void maybeDefinePersonas(last.text).then(() => {
-            void maybeDelegate(nodeId, last.text)
-            void maybeSpawn(nodeId, last.text)
+            // With planning on, what an orchestrator wrote is a proposal. The
+            // gate is here rather than in the prompt, so an agent that reaches
+            // for a protocol out of habit still can't start work on its own —
+            // and that has to cover DELEGATE too, or "run it on an agent that
+            // already exists" is a way around the gate rather than a different
+            // kind of work.
+            const st = get()
+            const author = st.nodes.find((n) => n.id === nodeId)
+            const gated =
+              st.planning && !!author && isSession(author) && author.data.role === 'orchestrator'
+            if (gated) {
+              proposePlan(nodeId, last.text)
+            } else {
+              void maybeDelegate(nodeId, last.text)
+              void maybeSpawn(nodeId, last.text)
+            }
           })
         }
         break
@@ -1564,50 +1667,68 @@ export function parseSpawn(text: string): { personality: string; task: string } 
 async function maybeSpawn(fromNodeId: string, text: string) {
   const parsed = parseSpawn(text)
   if (!parsed) return
-  const { personality: personalityName, task } = parsed
+  await spawnChild(fromNodeId, parsed.personality, parsed.task)
+}
+
+/** What came of asking for an agent: the one that ran, or why none did. */
+type SpawnResult = { ok: true; childId: string } | { ok: false; error: string }
+
+/**
+ * Create a worker, run the task on it, and feed the answer back to whoever
+ * asked for it.
+ *
+ * Split out from the SPAWN protocol so a plan step can use it: a step is a
+ * spawn the user agreed to, and the two must not drift into two subtly
+ * different ways of starting an agent. Every refusal comes back as a string
+ * rather than only landing on the node, so the plan can show which step
+ * failed and why.
+ */
+async function spawnChild(
+  fromNodeId: string,
+  personalityName: string,
+  task: string,
+): Promise<SpawnResult> {
+  const refuse = (error: string): SpawnResult => {
+    noteOnNode(fromNodeId, error)
+    return { ok: false, error }
+  }
 
   const st = useStore.getState()
   const parent = st.nodes.find((n) => n.id === fromNodeId)
-  if (!parent || parent.type !== 'session') return
+  if (!parent || parent.type !== 'session') {
+    return { ok: false, error: 'That agent is no longer on the canvas.' }
+  }
 
   const roster = rosterFor(st.library)
   const persona = roster.find((p) => p.name.toLowerCase() === personalityName.toLowerCase())
   if (!persona) {
     const known = roster.map((p) => p.name).join(', ')
-    noteOnNode(
-      fromNodeId,
+    return refuse(
       `Couldn't spawn "${personalityName}" — no persona by that name.` +
         (known ? ` Available: ${known}.` : ' The persona library is empty.'),
     )
-    return
   }
 
   if (spawnDepth(st.edges, fromNodeId) >= MAX_SPAWN_DEPTH) {
-    noteOnNode(
-      fromNodeId,
+    return refuse(
       `Couldn't spawn "${persona.name}" — already ${MAX_SPAWN_DEPTH} levels deep in spawned agents. Ask the orchestrator to run this itself, or start it from the top.`,
     )
-    return
   }
 
   // Per agent. This used to count every spawn edge on the canvas, so after six
   // spawns in the canvas's whole life every later spawn was refused in silence.
   const myChildren = st.edges.filter((e) => e.type === 'spawn' && e.source === fromNodeId).length
   if (myChildren >= MAX_CHILDREN_PER_AGENT) {
-    noteOnNode(
-      fromNodeId,
+    return refuse(
       `Couldn't spawn "${persona.name}" — this agent already has ${myChildren} children, the limit. Delete some from the canvas to make room.`,
     )
-    return
   }
 
   const sessionCount = st.nodes.filter((n) => n.type === 'session').length
   if (sessionCount >= MAX_SESSIONS) {
-    noteOnNode(
-      fromNodeId,
+    return refuse(
       `Couldn't spawn "${persona.name}" — the canvas is at its limit of ${MAX_SESSIONS} agents.`,
     )
-    return
   }
 
   // Place the child to the right of its parent — the direction the flow reads
@@ -1694,6 +1815,66 @@ async function maybeSpawn(fromNodeId: string, text: string) {
           : `${name} (a ${persona.name}) reported:\n\n${answer}`,
       )
   }
+  return { ok: true, childId }
+}
+
+/**
+ * Turn what the orchestrator wrote into a plan waiting on the user.
+ *
+ * Steps land pending — nothing has run, and nothing will until the user says
+ * so. A reply that arrives while a plan is still live adds to it rather than
+ * replacing it: the orchestrator writes again after each step reports back,
+ * and throwing away the steps already approved would lose the thread.
+ */
+function proposePlan(fromNodeId: string, text: string) {
+  const parsed = parsePlan(text)
+  if (!parsed.length) return
+
+  const steps: PlanStep[] = parsed.map((p) => ({
+    id: `step_${uid()}`,
+    persona: p.persona,
+    task: p.task,
+    state: 'pending',
+  }))
+
+  useStore.setState((s) => {
+    const carry = s.plan && s.plan.fromNodeId === fromNodeId && planLive(s.plan.steps) ? s.plan : null
+    if (carry) return { plan: { ...carry, steps: [...carry.steps, ...steps] } }
+
+    const node = s.nodes.find((n) => n.id === fromNodeId)
+    // What was asked for, so a plan still makes sense hours later.
+    const goal =
+      node && isSession(node)
+        ? (node.data.messages.filter((m) => m.role === 'user').at(-1)?.text ?? '')
+        : ''
+    return {
+      plan: { fromNodeId, goal: goal.slice(0, 240), steps, proposedAt: Date.now() },
+    }
+  })
+}
+
+/**
+ * Run one approved step. Marks it running while its agent works, then done or
+ * failed — a plan that ran is a record of what happened, not a blank slate.
+ */
+async function runPlanStep(fromNodeId: string, stepId: string) {
+  const patch = (fn: (s: PlanStep) => PlanStep) =>
+    useStore.setState((s) =>
+      s.plan
+        ? { plan: { ...s.plan, steps: s.plan.steps.map((st) => (st.id === stepId ? fn(st) : st)) } }
+        : s,
+    )
+
+  const step = useStore.getState().plan?.steps.find((x) => x.id === stepId)
+  if (!step || step.state !== 'pending') return
+
+  patch((st) => ({ ...st, state: 'running', error: undefined }))
+  const result = await spawnChild(fromNodeId, step.persona, step.task)
+  patch((st) =>
+    result.ok
+      ? { ...st, state: 'done', childId: result.childId }
+      : { ...st, state: 'failed', error: result.error },
+  )
 }
 
 async function maybeDelegate(fromNodeId: string, text: string) {

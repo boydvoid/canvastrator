@@ -1,7 +1,7 @@
 import type { Edge } from '@xyflow/react'
 import { SESSION_SIZE } from './layout'
 import type { GtNode } from './store'
-import type { ContextEntry, Message, Notification, PersonalityNodeData } from './types'
+import type { ContextEntry, Message, Notification, PersonalityNodeData, Plan } from './types'
 
 /** Bumped when the saved shape changes in a way older files can't satisfy. */
 export const CANVAS_VERSION = 1
@@ -45,6 +45,10 @@ export type CanvasData = {
   /** Free-text rules every agent on this canvas is spawned with. */
   globalRules?: string
   notifications?: Notification[]
+  /** Whether the orchestrator proposes work rather than starting it. */
+  planning?: boolean
+  /** A plan the user hasn't finished with. */
+  plan?: Plan | null
 }
 
 /** The slice of the store a canvas is made of. */
@@ -57,6 +61,8 @@ export type CanvasSnapshot = {
   autoPlaced: Set<string>
   globalRules: string
   notifications: Notification[]
+  planning: boolean
+  plan: Plan | null
 }
 
 /**
@@ -125,6 +131,18 @@ export function serializeCanvas(s: CanvasSnapshot): CanvasData {
     autoPlaced: [...(s.autoPlaced ?? [])].filter((id) => ids.has(id)),
     globalRules: s.globalRules ?? '',
     notifications: s.notifications ?? [],
+    planning: s.planning ?? true,
+    // A step that was mid-flight when the app closed is pending again: its
+    // agent is gone with the process, and a step stuck on "running" for ever
+    // is worse than one the user has to approve twice.
+    plan: s.plan
+      ? {
+          ...s.plan,
+          steps: s.plan.steps.map((st) =>
+            st.state === 'running' ? { ...st, state: 'pending' as const } : st,
+          ),
+        }
+      : null,
   }
 }
 
@@ -203,5 +221,18 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
     notifications: (data?.notifications ?? []).filter(
       (n): n is Notification => !!n && typeof n.id === 'string',
     ),
+    // Absent in canvases saved before planning existed. On is the default for
+    // those too: the mode is about what the *next* turn does, and a canvas
+    // that opens ready to run unattended is the surprise, not the other way.
+    planning: data?.planning ?? true,
+    plan:
+      data?.plan && Array.isArray(data.plan.steps) && data.plan.steps.length
+        ? {
+            ...data.plan,
+            steps: data.plan.steps.map((st) =>
+              st.state === 'running' ? { ...st, state: 'pending' as const } : st,
+            ),
+          }
+        : null,
   }
 }

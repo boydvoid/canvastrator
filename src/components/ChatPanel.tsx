@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { ArrowDown, Hexagon, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { Composer } from '@/components/Composer'
+import { PlanPanel } from '@/components/PlanPanel'
 import { AgentMessage } from '@/components/AgentMessage'
 import { RunningStatus } from '@/components/RunningStatus'
 import {
@@ -276,6 +277,7 @@ export function ChatPanel() {
   const send = useStore((s) => s.send)
   const interrupt = useStore((s) => s.interrupt)
   const setPermission = useStore((s) => s.setPermission)
+  const plan = useStore((s) => s.plan)
 
   const sessions = useMemo(
     () => nodes.filter((n): n is GtNode & { type: 'session' } => n.type === 'session'),
@@ -417,6 +419,10 @@ export function ChatPanel() {
       </div>
 
       {showSettings && <SessionSettings node={active} />}
+
+      {/* The plan sits with the agent that wrote it — it is that
+          conversation's proposal, not the canvas's. */}
+      {plan?.fromNodeId === active.id && <PlanPanel plan={plan} />}
 
       {busy && (
         <div className="shrink-0 border-b border-line-soft px-2.5 py-1">

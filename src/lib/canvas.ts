@@ -109,7 +109,8 @@ export async function saveCanvas(name?: string): Promise<boolean> {
       now.nodes !== written.nodes ||
       now.edges !== written.edges ||
       now.bus !== written.bus ||
-      now.globalRules !== written.globalRules,
+      now.globalRules !== written.globalRules ||
+      now.plan !== written.plan,
     canvasError: null,
   })
   return true
@@ -204,6 +205,7 @@ export function newCanvas() {
       canvasError: null,
       canvasDialog: null,
       globalRules: '',
+      plan: null,
     }),
   )
 }
@@ -332,7 +334,11 @@ export function watchCanvas(): () => void {
       s.nodes !== seen.nodes ||
       s.edges !== seen.edges ||
       s.bus !== seen.bus ||
-      s.globalRules !== seen.globalRules
+      s.globalRules !== seen.globalRules ||
+      // A plan is work the user agreed to, or is about to; losing it to a
+      // crash would mean reading the orchestrator's reasoning over again.
+      s.plan !== seen.plan ||
+      s.planning !== seen.planning
     seen = s
     if (!changed || loading) return
 

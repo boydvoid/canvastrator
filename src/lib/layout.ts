@@ -67,8 +67,9 @@ const SIBLING_GAP_Y = 52
 /** Between an MCP server and the column of tool nodes it feeds. */
 const SATELLITE_GAP_X = 28
 
-/** An agent node is a label, not a window: one fixed size, everywhere. */
-export const SESSION_SIZE = { w: 260, h: 64 }
+/** An agent node is a label with a two-line stream window under it: one fixed
+ *  size, everywhere. */
+export const SESSION_SIZE = { w: 260, h: 106 }
 /** A file is a chip. There are a lot of them, and they stack. */
 export const FILE_SIZE = { w: 196, h: 38 }
 

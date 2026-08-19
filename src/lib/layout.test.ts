@@ -223,7 +223,13 @@ describe('findFreeSpot', () => {
 
 describe('sizeOf', () => {
   it('prefers a measured size, falls back per node type', () => {
-    expect(sizeOf(session('s', 0, 0))).toEqual({ w: 260, h: 64 })
+    // The helper hands sessions a measured size; strip it to see the fallback.
+    const measured = session('s', 0, 0)
+    expect(sizeOf(measured)).toEqual({ w: 260, h: 64 })
+    expect(sizeOf({ ...measured, width: undefined, height: undefined } as GtNode)).toEqual({
+      w: 260,
+      h: 106,
+    })
     expect(sizeOf(file('f'))).toEqual({ w: 196, h: 38 })
   })
 })
