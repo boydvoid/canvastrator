@@ -68,7 +68,7 @@ export function AppBar({
           variant="ghost"
           size="icon"
           className="h-6 w-6"
-          title="Show sidebar  ⌘\"
+          title="Show sidebar  ⌘B"
           onClick={onToggleSidebar}
         >
           <PanelLeftOpen size={13} />

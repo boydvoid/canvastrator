@@ -4,6 +4,7 @@ import {
   PANEL_RANGE,
   clampWidth,
   columnsWidth,
+  isSidebarChord,
   parsePanels,
   tierFor,
   type PanelWidths,
@@ -93,5 +94,27 @@ describe('parsePanels', () => {
     expect(p.widths.canvases).toBe(PANEL_RANGE.canvases.max)
     expect(p.widths.files).toBe(PANEL_RANGE.files.min)
     expect(p.widths.chats).toBe(PANEL_RANGE.chats.default)
+  })
+})
+
+describe('isSidebarChord', () => {
+  it('takes ⌘B, which is what the ask was', () => {
+    expect(isSidebarChord({ key: 'b', metaKey: true })).toBe(true)
+    expect(isSidebarChord({ key: 'B', metaKey: true })).toBe(true)
+    expect(isSidebarChord({ key: 'b', ctrlKey: true })).toBe(true)
+  })
+
+  it('keeps ⌘\\, so nothing anyone had in their fingers breaks', () => {
+    expect(isSidebarChord({ key: '\\', metaKey: true })).toBe(true)
+  })
+
+  it('leaves the unmodified key alone — b is typed into fields all day', () => {
+    expect(isSidebarChord({ key: 'b' })).toBe(false)
+  })
+
+  it('does not swallow chords that belong to something else', () => {
+    expect(isSidebarChord({ key: 'b', metaKey: true, shiftKey: true })).toBe(false)
+    expect(isSidebarChord({ key: 'b', metaKey: true, altKey: true })).toBe(false)
+    expect(isSidebarChord({ key: 's', metaKey: true })).toBe(false)
   })
 })

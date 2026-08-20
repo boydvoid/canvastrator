@@ -192,17 +192,39 @@ export function usePanels() {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
-// ⌘\ is the shortcut every mac app with a sidebar uses. Bound once, at module
-// level: a hook would bind it again for every column that reads the prefs, and
-// the group would toggle once per listener.
+/**
+ * ⌘B and ⌘\ both toggle the sidebar.
+ *
+ * ⌘\ is the older mac convention and stays bound so nothing anyone has in
+ * their fingers breaks; ⌘B is what editors use and is what this app is asked
+ * for. Bound once, at module level: a hook would bind it again for every
+ * column that reads the prefs, and the group would toggle once per listener.
+ *
+ * Not gated on `shouldIgnoreShortcut` — unlike the bare-letter canvas keys,
+ * a modified chord is not something you type into a field by accident, and
+ * hiding a panel is exactly what you want while the cursor is in one.
+ */
+const SIDEBAR_KEYS = ['b', '\\']
+
+/** The chord itself, split out so it can be tested without a DOM. */
+export function isSidebarChord(e: {
+  key: string
+  metaKey?: boolean
+  ctrlKey?: boolean
+  altKey?: boolean
+  shiftKey?: boolean
+}): boolean {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return false
+  return SIDEBAR_KEYS.includes(e.key.toLowerCase())
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener(
     'keydown',
     (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
-        e.preventDefault()
-        togglePanels()
-      }
+      if (!isSidebarChord(e)) return
+      e.preventDefault()
+      togglePanels()
     },
     true,
   )

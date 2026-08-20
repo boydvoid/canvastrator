@@ -173,7 +173,7 @@ export function Sidebar({
           variant="ghost"
           size="icon"
           className="ml-auto h-5 w-5"
-          title="Hide sidebar  ⌘\"
+          title="Hide sidebar  ⌘B"
           onClick={onToggle}
         >
           <PanelLeftClose size={12} />

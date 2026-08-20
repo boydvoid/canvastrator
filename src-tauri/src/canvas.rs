@@ -84,9 +84,21 @@ pub fn list_canvases(app: AppHandle) -> Result<Vec<CanvasMeta>, String> {
     Ok(out)
 }
 
+/// Returned when the canvas file simply is not there any more.
+///
+/// The frontend has to tell this apart from every other failure. A canvas the
+/// user deleted is nothing to complain about — reopening it is a convenience —
+/// while one that is present but unreadable is a canvas of theirs that failed
+/// to open, and treating the two the same is how the pointer to it gets thrown
+/// away and the work starts again in a new file.
+pub const MISSING: &str = "canvas-missing";
+
 #[tauri::command]
 pub fn load_canvas(app: AppHandle, id: String) -> Result<CanvasDoc, String> {
     let path = path_for(&app, &id)?;
+    if !path.exists() {
+        return Err(MISSING.to_string());
+    }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("{id}: {e}"))?;
     serde_json::from_str(&raw).map_err(|e| format!("{id} is not a canvas file: {e}"))
 }

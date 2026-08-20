@@ -27,8 +27,66 @@ let loading = false
 
 let timer: ReturnType<typeof setTimeout> | null = null
 
+/**
+ * Bumped whenever the canvas on screen is replaced — opened, cleared, deleted.
+ *
+ * A save is not instant, and what it does *after* the write is the dangerous
+ * half: it records the id as the last canvas and writes it back into the
+ * store. Do that for a canvas that was deleted while the write was in flight
+ * and you have resurrected it — the pointer says to reopen it, and the next
+ * launch does. Catching the id afterwards is not enough either, because a new
+ * canvas can have been opened in the meantime and would be overwritten by the
+ * finishing save. So the save takes a ticket, and hands nothing back if the
+ * canvas moved on while it was away.
+ */
+let epoch = 0
+
+/**
+ * The write currently in flight, so a delete can wait for it.
+ *
+ * Ordering, not exclusion: without this, a save that started before the delete
+ * lands after it, and writes the file straight back out of the snapshot it was
+ * already holding. The delete then has nothing left to remove — it already ran.
+ */
+let pendingWrite: Promise<unknown> | null = null
+
 /** Canvas id we've already warned about, so the log isn't spammed per edit. */
 let emptyGuardTripped: string | null = null
+
+/**
+ * What the Rust side says when the file is simply gone. Anything else is a
+ * canvas of the user's that failed to open, which is a different situation.
+ */
+const MISSING = 'canvas-missing'
+
+/**
+ * The window between the app starting and the launch restore settling.
+ *
+ * Autosave is watching before the restore has landed, and for that moment the
+ * store looks exactly like a brand-new canvas: no id, and any node that
+ * appears would mint one. That is one of the two ways the app used to grow an
+ * "untitled" on every launch — the file it minted was orphaned a moment later
+ * when the real canvas loaded over it, and stayed in the list for ever.
+ */
+let launchPending = false
+
+/**
+ * Set when the launch restore failed for a reason other than the file being
+ * gone — an unreadable canvas, a bad write, a disk that did not answer.
+ *
+ * The other way an "untitled" appeared: the failure was swallowed, the pointer
+ * to the canvas was thrown away, and the next node minted a fresh file. So the
+ * user's canvas was still on disk, and their work carried on in a new one,
+ * silently, every single launch. While this is set nothing may mint a new
+ * canvas — the error is on screen, and starting a new one is a decision for
+ * the user to make rather than a side effect of typing.
+ */
+let detached = false
+
+/** Called synchronously at startup, before anything can be added to the graph. */
+export function beginLaunchRestore() {
+  launchPending = true
+}
 
 function suppress<T>(fn: () => T): T {
   loading = true
@@ -56,20 +114,38 @@ function rememberLast(id: string | null) {
  * leaves an empty surface, which is the same as a first run.
  */
 export async function restoreLastCanvas(): Promise<boolean> {
-  let last: string | null = null
   try {
-    last = localStorage.getItem(LAST_KEY)
-  } catch {
+    let last: string | null = null
+    try {
+      last = localStorage.getItem(LAST_KEY)
+    } catch {
+      return false
+    }
+    if (!last) return false
+
+    const ok = await openCanvas(last)
+    if (ok) return true
+
+    const why = useStore.getState().canvasError ?? ''
+    if (why.includes(MISSING)) {
+      // Deleted since last time. Nothing to say — an empty surface is the
+      // same as a first run, and the pointer is dead weight.
+      rememberLast(null)
+      useStore.setState({ canvasError: null })
+      return false
+    }
+
+    // It exists and would not open. Keep pointing at it: the file is the
+    // user's work, and the next launch should try again rather than having
+    // quietly moved on. Nothing autosaves until they choose what to do.
+    detached = true
+    useStore.setState({
+      canvasError: `Couldn't open your last canvas — ${why}. Pick one from the sidebar, or start a new canvas. Nothing is being saved until you do.`,
+    })
     return false
+  } finally {
+    launchPending = false
   }
-  if (!last) return false
-  const ok = await openCanvas(last)
-  if (!ok) {
-    rememberLast(null)
-    // A canvas that's gone isn't an error worth showing on an empty surface.
-    useStore.setState({ canvasError: null })
-  }
-  return ok
 }
 
 export const listSavedCanvases = (): Promise<CanvasMeta[]> => listCanvases()
@@ -87,18 +163,32 @@ export async function saveCanvas(name?: string): Promise<boolean> {
   // Snapshot first: a streaming turn can land more text while the write is in
   // flight, and that edit must not be marked as saved.
   const written = useStore.getState()
+  const mine = epoch
   try {
-    await saveCanvasDoc({
+    const write = saveCanvasDoc({
       id,
       name: canvasName,
       updatedAt,
       version: CANVAS_VERSION,
       data: serializeCanvas(written),
     })
+    pendingWrite = write
+    try {
+      await write
+    } finally {
+      if (pendingWrite === write) pendingWrite = null
+    }
   } catch (e) {
-    useStore.setState({ canvasError: String(e) })
+    // A canvas that was deleted mid-write fails here on some paths; that is
+    // the delete working, not an error to put in front of the user.
+    if (mine === epoch) useStore.setState({ canvasError: String(e) })
     return false
   }
+
+  // The canvas moved on while this was in flight — deleted, cleared, or
+  // another one opened. The bytes are written and there is nothing to be done
+  // about that, but this must not point the app back at it.
+  if (mine !== epoch) return false
 
   const now = useStore.getState()
   rememberLast(id)
@@ -150,6 +240,8 @@ export async function openCanvas(id: string): Promise<boolean> {
   const restored = deserializeCanvas(doc.data)
   rescuePersonas(doc.data)
   rememberLast(doc.id)
+  detached = false
+  epoch++
   suppress(() =>
     useStore.setState({
       ...restored,
@@ -190,7 +282,12 @@ function rescuePersonas(data: Parameters<typeof strandedPersonas>[0]) {
 /** Start over. The canvas on disk, if any, is left alone. */
 export function newCanvas() {
   if (timer) clearTimeout(timer)
+  timer = null
+  epoch++
   rememberLast(null)
+  // An explicit fresh start is exactly the decision the detached state was
+  // waiting for, so autosave may mint again.
+  detached = false
   suppress(() =>
     useStore.setState({
       nodes: [],
@@ -212,8 +309,29 @@ export function newCanvas() {
   )
 }
 
+/**
+ * Everything that has to stop before a file can be removed.
+ *
+ * A delete competes with autosave twice over: a debounced save may be seconds
+ * from firing, and one may already be in flight holding a snapshot of the
+ * canvas about to go. Both write the file back — so the row returns, or worse,
+ * the file is gone from the list and back on disk, and the next launch reopens
+ * the canvas the user deleted.
+ */
+async function quiesce() {
+  if (timer) clearTimeout(timer)
+  timer = null
+  // A failed write is still a finished one, and that is all this waits for.
+  await pendingWrite?.catch(() => {})
+}
+
 /** Delete a saved canvas. */
 export async function deleteCanvas(id: string): Promise<boolean> {
+  await quiesce()
+  // Before the delete, so a save that slips in behind it knows the canvas has
+  // moved on and keeps its hands off the pointer.
+  if (useStore.getState().canvasId === id) epoch++
+
   try {
     await deleteCanvasDoc(id)
   } catch (e) {
@@ -230,6 +348,9 @@ export async function deleteCanvas(id: string): Promise<boolean> {
  * the sweep carries on; the caller gets the ids that actually went.
  */
 export async function deleteCanvases(ids: string[]): Promise<string[]> {
+  await quiesce()
+  if (ids.includes(useStore.getState().canvasId ?? '')) epoch++
+
   const gone: string[] = []
   const failed: string[] = []
 
@@ -358,6 +479,11 @@ export function watchCanvas(): () => void {
       return
     }
     emptyGuardTripped = null
+
+    // Minting a *new* canvas is the only thing gated here. A canvas that
+    // already has a file goes on saving to it either way — the risk being
+    // guarded against is a second file, not a lost edit.
+    if (!s.canvasId && (launchPending || detached)) return
 
     if (timer) clearTimeout(timer)
     timer = setTimeout(() => {
