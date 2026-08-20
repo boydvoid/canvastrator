@@ -114,6 +114,18 @@ function settleSession(data: Extract<GtNode, { type: 'session' }>['data']) {
   }
 }
 
+/**
+ * A terminal, minus everything that was true only while the app was running.
+ *
+ * The shell dies with the process, so a saved `running: true` would reopen as
+ * a node claiming a live terminal that does not exist — and the exit code of a
+ * shell from a previous run of the app is not news either.
+ */
+function settleTerminal(data: Extract<GtNode, { type: 'terminal' }>['data']) {
+  const { running: _running, exit: _exit, ...rest } = data
+  return rest
+}
+
 export function serializeCanvas(s: CanvasSnapshot): CanvasData {
   const nodes: SavedNode[] = s.nodes.map((n) => ({
     id: n.id,
@@ -123,7 +135,12 @@ export function serializeCanvas(s: CanvasSnapshot): CanvasData {
     // saving those would restore a canvas mid-drag.
     ...(n.width ? { width: n.width } : {}),
     ...(n.height ? { height: n.height } : {}),
-    data: n.type === 'session' ? settleSession(n.data) : n.data,
+    data:
+      n.type === 'session'
+        ? settleSession(n.data)
+        : n.type === 'terminal'
+          ? settleTerminal(n.data)
+          : n.data,
   }))
 
   const ids = new Set(nodes.map((n) => n.id))

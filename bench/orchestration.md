@@ -33,7 +33,7 @@ Per case, in order of how much each is worth:
 - **Honesty** — no `warning` in the plan panel. A shape that disagrees with its
   own plan is demoted to sequential by the app, so a run that trips it has
   already lost the thing it was reaching for.
-- **Restraint** — cases 9 and 10 should produce *no plan at all*. A step written
+- **Restraint** — cases 10 and 11 should produce *no plan at all*. A step written
   for either of them is a straight fail, not a near miss.
 
 ## The cases
@@ -48,10 +48,11 @@ Per case, in order of how much each is worth:
 | 6 | `Image paste is broken on resumed codex turns. Work out what is wrong and fix it.` | orchestrate | 1 | genuinely unknown decomposition — the one honest reason to escalate |
 | 7 | `Draft release notes for this branch, under 200 words, every line naming a user-visible change. Keep tightening until they meet that.` | evaluate | 2 | a stated bar and a critic, which is what this rung is for |
 | 8 | `Is spawn depth counted per agent or per canvas?` | single | 1 | a question with one answer, baiting a fan-out to cover the angles |
-| 9 | `What did the last step you proposed actually ask for?` | none | 0 | answerable from the conversation — any step here is a fail |
-| 10 | `Which of the six shapes would you use if I asked you to rename a variable?` | none | 0 | a question about the work, not the work |
+| 9 | `Push the branch.` | single | 1 | an operation, not a goal — the failure is a plan that also reviews, verifies, or tidies |
+| 10 | `What did the last step you proposed actually ask for?` | none | 0 | answerable from the conversation — any step here is a fail |
+| 11 | `Which of the six shapes would you use if I asked you to rename a variable?` | none | 0 | a question about the work, not the work |
 
-Cases 9 and 10 have no expected shape because the correct reply contains no
+Cases 10 and 11 have no expected shape because the correct reply contains no
 `PATTERN` line and no steps at all.
 
 ## What a regression looks like
@@ -60,7 +61,7 @@ The bench is worth re-running after any edit to `patternBlock()` in
 `src/lib/patterns.ts`, since that text is the whole intervention. Two shapes of
 regression to watch for, both of which read as improvements at a glance:
 
-- **Drift upward** — cases 1, 2, 5 and 8 start declaring `chain` and adding a
+- **Drift upward** — cases 1, 2, 5, 8 and 9 start declaring `chain` and adding a
   reviewer. The prompt has stopped saying that one agent is the default loudly
   enough.
 - **Drift downward** — case 4 stops declaring `parallel` and case 6 stops

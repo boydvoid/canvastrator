@@ -81,6 +81,9 @@ export const SESSION_SIZE = { w: 260, h: 106 }
 /** A file is a chip. There are a lot of them, and they stack. */
 export const FILE_SIZE = { w: 196, h: 38 }
 
+/** A terminal is a label with a line of its last output under it. */
+export const TERMINAL_SIZE = { w: 240, h: 64 }
+
 /** The usage panel. Wide enough for a name, a meter and two numbers per row. */
 export const USAGE_SIZE = { w: 300, h: 180 }
 
@@ -93,6 +96,7 @@ const DEFAULT_SIZE: Record<GtNode['type'], { w: number; h: number }> = {
   mcp: { w: 240, h: 150 },
   mcptool: { w: 208, h: 52 },
   usage: USAGE_SIZE,
+  terminal: TERMINAL_SIZE,
 }
 
 export const sizeOf = (n: GtNode) => ({

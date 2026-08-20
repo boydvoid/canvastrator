@@ -94,6 +94,8 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
       (s.chatTarget === id || (s.chatTarget === null && d.role === 'orchestrator')),
   )
 
+  const setChatTarget = useStore((s) => s.setChatTarget)
+
   const accent = PROVIDER_ACCENT[d.provider]
   const busy = d.state === 'thinking' || d.state === 'streaming'
 
@@ -117,6 +119,10 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
 
   return (
     <div
+      // Clicking an agent points the chat at it, the way clicking a terminal
+      // opens that terminal. Without this the two disagree: a terminal could
+      // take the box over and no node could take it back.
+      onClick={() => setChatTarget(id)}
       className={cn(
         'gt-spawn flex h-full w-full cursor-pointer flex-col gap-0.5 overflow-hidden rounded-xl border bg-panel/90 px-3 py-2 backdrop-blur transition-colors',
         selected || inDock ? 'border-line-strongest' : 'border-line',

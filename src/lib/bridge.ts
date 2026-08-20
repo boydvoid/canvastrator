@@ -110,3 +110,31 @@ export const deleteCanvasDoc = (id: string) => invoke<void>('delete_canvas', { i
 
 export const onSessionEvent = (handler: (e: SessionEvent) => void) =>
   listen<SessionEvent>('session://event', (e) => handler(e.payload))
+
+/**
+ * The terminal nodes' shells. One per node id, living in Rust so a build keeps
+ * running while you look at something else.
+ */
+export const terminalOpen = (terminalId: string, cwd: string, cols: number, rows: number) =>
+  invoke<boolean>('terminal_open', { terminalId, cwd, cols, rows })
+
+export const terminalWrite = (terminalId: string, data: string) =>
+  invoke<void>('terminal_write', { terminalId, data })
+
+export const terminalResize = (terminalId: string, cols: number, rows: number) =>
+  invoke<void>('terminal_resize', { terminalId, cols, rows })
+
+export const terminalClose = (terminalId: string) =>
+  invoke<void>('terminal_close', { terminalId })
+
+/** Which shells this run of the app actually has. */
+export const terminalLive = () => invoke<string[]>('terminal_live')
+
+export type TerminalChunk = { terminalId: string; data: string }
+export type TerminalExit = { terminalId: string; code: number | null }
+
+export const onTerminalData = (fn: (c: TerminalChunk) => void) =>
+  listen<TerminalChunk>('terminal://data', (e) => fn(e.payload))
+
+export const onTerminalExit = (fn: (e: TerminalExit) => void) =>
+  listen<TerminalExit>('terminal://exit', (e) => fn(e.payload))

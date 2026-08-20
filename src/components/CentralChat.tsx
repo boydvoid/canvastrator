@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown, ChevronDown, ChevronUp, Cpu, Hexagon, SlidersHorizontal } from 'lucide-react'
 import { Composer } from '@/components/Composer'
 import { PlanPanel } from '@/components/PlanPanel'
+import { TerminalView } from '@/components/TerminalView'
 import { RunningStatus } from '@/components/RunningStatus'
 import { Bubble, EffortMenu, FolderMenu, ModelMenu, SessionSettings } from '@/components/ChatPanel'
 import {
@@ -168,6 +169,14 @@ function OrchestraMenu({ fallback }: { fallback: Provider }) {
  * It reads the same store the node transcripts do, so a reply streaming into a
  * node appears here at the same time.
  */
+/**
+ * The floating box itself. Shared, because a terminal and a conversation are
+ * the same window in the same place — only the contents differ, and two copies
+ * of this string would drift the moment one of them was adjusted.
+ */
+const BOX =
+  'pointer-events-auto absolute bottom-4 left-1/2 z-20 flex max-h-[calc(100%-2rem)] w-[min(46rem,calc(100%-3rem))] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-xl backdrop-blur'
+
 export function CentralChat() {
   const nodes = useStore((s) => s.nodes)
   // Subscribed, not read once: which folder is primary is an edge *type*, so
@@ -184,6 +193,14 @@ export function CentralChat() {
   const sessions = useMemo(
     () => nodes.filter((n): n is GtNode & { type: 'session' } => n.type === 'session'),
     [nodes],
+  )
+
+  // A terminal node clicked on the canvas takes the box over: it is a screen
+  // you type into, which is what this space is for, and it is far too small to
+  // work in on the canvas itself. The conversation is one click away — the
+  // agent picker in the header is still there.
+  const terminal = nodes.find(
+    (n): n is GtNode & { type: 'terminal' } => n.type === 'terminal' && n.id === chatTarget,
   )
 
   // Default to the orchestrator: it's the one you talk to most, and a stale
@@ -227,6 +244,17 @@ export function CentralChat() {
     }
   }, [active?.id])
 
+  // A terminal takes the whole box, header included: nothing in the agent
+  // header applies to a shell, and most of it — model, effort, permission —
+  // would be describing something that is not there.
+  if (terminal) {
+    return (
+      <div data-shortcuts="off" className={BOX}>
+        <TerminalView node={terminal} />
+      </div>
+    )
+  }
+
   if (!active) return null
 
   const d = active.data
@@ -255,7 +283,7 @@ export function CentralChat() {
       // ceiling it grew straight past the top of the canvas, which clips it.
       // Everything above that edge was then unreachable: not scrolled to, not
       // clickable, and the plan waiting to be approved is what sits up there.
-      className="pointer-events-auto absolute bottom-4 left-1/2 z-20 flex max-h-[calc(100%-2rem)] w-[min(46rem,calc(100%-3rem))] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-xl backdrop-blur"
+      className={BOX}
     >
       {/* who you're talking to */}
       <div className="flex shrink-0 items-center gap-1.5 border-b border-line-soft px-2.5 py-1.5">

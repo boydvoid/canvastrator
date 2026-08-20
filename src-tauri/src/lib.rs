@@ -9,6 +9,7 @@ mod migrate;
 mod providers;
 mod session;
 mod skills;
+mod terminal;
 
 use std::sync::Arc;
 
@@ -256,6 +257,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             app.manage(Arc::new(SessionRegistry::default()));
+            app.manage(Arc::new(terminal::TerminalRegistry::default()));
             // Before anything reads the data dir: a rename must not strand the
             // user's canvases under the old bundle identifier.
             migrate::migrate_legacy_data(app.handle());
@@ -296,7 +298,12 @@ pub fn run() {
             skills::discover_skills,
             skills::list_project_files,
             diff::file_diff_base,
-            mcp::discover_mcp_servers
+            mcp::discover_mcp_servers,
+            terminal::terminal_open,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close,
+            terminal::terminal_live
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

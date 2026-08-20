@@ -403,6 +403,23 @@ export type SessionNodeData = {
  */
 export type UsageNodeData = { usageId: string }
 
+/**
+ * A real shell on the canvas.
+ *
+ * Holds an id and a name and nothing else. Whether a shell is actually running
+ * is a fact about this run of the app — the process dies with it — so it is
+ * asked for rather than stored; a restored node that claimed a live shell it
+ * no longer has would be lying about the one thing you look at it for.
+ */
+export type TerminalNodeData = {
+  terminalId: string
+  name: string
+  /** Set while a shell is up, for this run only. Never persisted. */
+  running?: boolean
+  /** How it ended, so a dead terminal says why rather than just going quiet. */
+  exit?: { code: number | null }
+}
+
 /** A directory on the canvas. Wiring it to a session sets that session's cwd. */
 export type FolderNodeData = {
   folderId: string

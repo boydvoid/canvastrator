@@ -16,13 +16,16 @@ import {
   fileStamp,
   interruptSession,
   sendTurn,
+  terminalClose,
 } from './bridge'
+import { forgetEmulator } from './terminals'
 import { digest, readShared } from './filecache'
 import { attachableImage } from './filekind'
 import { handBack, parseReport, REPORT_INSTRUCTION, reportBlock } from './report'
 import { looksLikeQuestion } from './asking'
 import { boxOf, FILE_SIZE, findFreeSpot, layoutCanvas, SESSION_SIZE, sizeOf } from './layout'
 import { parsePersonaDefinitions } from './persona-parse'
+import { choreBlock, looksLikeChore } from './chore'
 import {
   checkShape,
   fansOut,
@@ -55,6 +58,7 @@ import type {
   McpServer,
   McpToolNodeData,
   UsageNodeData,
+  TerminalNodeData,
   Message,
   ModelOption,
   OrchestraPrefs,
@@ -86,6 +90,7 @@ export type GtNode =
   | (Node<McpNodeData> & { type: 'mcp' })
   | (Node<McpToolNodeData> & { type: 'mcptool' })
   | (Node<UsageNodeData> & { type: 'usage' })
+  | (Node<TerminalNodeData> & { type: 'terminal' })
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 
@@ -134,7 +139,7 @@ type State = {
   library: Persona[]
   /** The right dock: chat with an agent, or browse personas. */
   libraryOpen: boolean
-  rightTab: 'chat' | 'personas'
+  rightTab: 'chat' | 'personas' | 'decisions'
   /** Session node the chat panel is pointed at. Falls back to the orchestrator. */
   chatTarget: string | null
 
@@ -179,6 +184,19 @@ type State = {
    * the existing one when there is one.
    */
   addUsage: (pos: { x: number; y: number }) => string
+  /**
+   * A shell on the canvas. Several are fine — one per thing you are watching —
+   * unlike the usage panel, which has nothing to distinguish two copies.
+   */
+  addTerminal: (pos: { x: number; y: number }) => string
+  /**
+   * Update what a terminal node says about its shell.
+   *
+   * Live state only — whether a shell is up, and how the last one ended. None
+   * of it is persisted: the process dies with the app, and a restored node
+   * claiming a running shell would be wrong about the one thing it is for.
+   */
+  patchTerminal: (nodeId: string, patch: Partial<TerminalNodeData>) => void
   initLibrary: () => Promise<void>
   setLibrary: (l: Persona[]) => Promise<void>
   toggleLibrary: () => void
@@ -230,7 +248,7 @@ type State = {
   setEffort: (nodeId: string, effort?: Effort) => void
   /** This agent's standing brief, prepended to every turn. */
   setInstructions: (nodeId: string, instructions: string) => void
-  setRightTab: (t: 'chat' | 'personas') => void
+  setRightTab: (t: 'chat' | 'personas' | 'decisions') => void
   setChatTarget: (nodeId: string | null) => void
 
   setCanvasDialog: (d: CanvasDialog | null) => void
@@ -262,6 +280,8 @@ const isFolder = (n: GtNode): n is GtNode & { type: 'folder' } => n.type === 'fo
 const isFile = (n: GtNode): n is GtNode & { type: 'file' } => n.type === 'file'
 const isMcp = (n: GtNode): n is GtNode & { type: 'mcp' } => n.type === 'mcp'
 const isMcpTool = (n: GtNode): n is GtNode & { type: 'mcptool' } => n.type === 'mcptool'
+export const isTerminal = (n: GtNode): n is GtNode & { type: 'terminal' } =>
+  n.type === 'terminal'
 
 /** `mcp__flowiki__search` → { server: 'flowiki', tool: 'search' } */
 export function parseMcpTool(name: string): { server: string; tool: string } | null {
@@ -975,6 +995,15 @@ export const useStore = create<State>((set, get) => ({
         const type = already.some((r) => r.primary) ? 'attach' : 'cwd'
         return { edges: addEdge({ ...conn, type }, s.edges) }
       }
+      // A folder wired into a terminal is the directory its shell runs in —
+      // the same rule sessions follow, and for the same reason: where a thing
+      // runs is read off the graph rather than kept as a setting that can
+      // disagree with it. Only one, because a shell has one cwd.
+      if (isFolder(source) && isTerminal(target)) {
+        const already = folderRootsFor(s.nodes, s.edges, target.id)
+        if (already.length) return s
+        return { edges: addEdge({ ...conn, type: 'cwd' }, s.edges) }
+      }
       // A file wired into a session is context for it.
       if (isFile(source) && isSession(target)) {
         return { edges: addEdge({ ...conn, type: 'file' }, s.edges) }
@@ -1291,6 +1320,36 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  patchTerminal: (nodeId, patch) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === nodeId && isTerminal(n) ? { ...n, data: { ...n.data, ...patch } } : n,
+      ) as GtNode[],
+    })),
+
+  addTerminal: (pos) => {
+    const id = `node_${uid()}`
+    const taken = new Set(
+      get()
+        .nodes.filter(isTerminal)
+        .map((n) => n.data.name),
+    )
+    let name = 'terminal'
+    for (let i = 2; taken.has(name); i++) name = `terminal-${i}`
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'terminal',
+          position: pos,
+          data: { terminalId: `term_${uid()}`, name },
+        } as GtNode,
+      ],
+    }))
+    return id
+  },
+
   addUsage: (pos) => {
     const existing = get().nodes.find((n) => n.type === 'usage')
     if (existing) return existing.id
@@ -1365,6 +1424,12 @@ export const useStore = create<State>((set, get) => ({
     // same path — so they're only dropped when the session itself goes.
     const gone = get().nodes.find((n) => n.id === id)
     if (gone && isSession(gone)) void clearSessionImages(gone.data.sessionId).catch(() => {})
+    // A terminal's shell is a process and its scrollback is memory; neither
+    // has anywhere to belong once the node is gone.
+    if (gone && isTerminal(gone)) {
+      void terminalClose(gone.data.terminalId).catch(() => {})
+      forgetEmulator(gone.data.terminalId)
+    }
     set((s) => ({
       // Deleting a folder node takes its `cwd` edge with it, so the survivors
       // need an heir promoted the same way detaching one does.
@@ -1720,6 +1785,11 @@ export const useStore = create<State>((set, get) => ({
       // mode withdrew the protocol, which is not the peers going away.
       else if (d.sentPeers && !s.planning) parts.push(peersEndedBlock())
     }
+
+    // A chore is recognised per turn, never as a standing rule: the next
+    // message may be real work, and an orchestrator holding "do not decompose"
+    // permanently is worse than one that never heard it.
+    if (d.role === 'orchestrator' && looksLikeChore(text)) parts.push(choreBlock(s.planning))
 
     parts.push(text)
     const prompt = parts.join('\n\n')
@@ -2638,7 +2708,18 @@ function mismatch(
   fromNodeId: string,
   id: PatternId | undefined,
   count: number,
+  /** What the user actually asked for, so a chore can be held to one step. */
+  goal = '',
 ): { warning?: string } {
+  // A chore that came back as a plan is the failure this catches: the user
+  // named one operation and got a project. The shape check below would let it
+  // through, because four steps under "chain" is perfectly consistent — it is
+  // only wrong against what was asked.
+  if (count > 1 && looksLikeChore(goal)) {
+    const complaint = `You asked for one thing and this came back as ${count} steps. Approve only the step you wanted, or drop the plan — running it in order either way.`
+    noteOnNode(fromNodeId, complaint)
+    return { warning: complaint }
+  }
   if (!id) return {}
   const complaint = checkShape(id, count)
   if (!complaint) return {}
@@ -2692,7 +2773,7 @@ function proposePlan(fromNodeId: string, text: string) {
           // that is the orchestrator-worker case, where what the work needs is
           // only clear once some of it has run.
           ...(chosen ? { pattern: chosen } : {}),
-          ...mismatch(fromNodeId, shape?.id, grown.length),
+          ...mismatch(fromNodeId, shape?.id, grown.length, carry.goal),
           steps: grown,
         },
       }
@@ -2711,7 +2792,7 @@ function proposePlan(fromNodeId: string, text: string) {
         steps,
         proposedAt: Date.now(),
         ...(chosen ? { pattern: chosen } : {}),
-        ...mismatch(fromNodeId, chosen?.id, steps.length),
+        ...mismatch(fromNodeId, chosen?.id, steps.length, goal),
       },
     }
   })

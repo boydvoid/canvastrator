@@ -1,5 +1,6 @@
-import { ChevronRight, Library, MessagesSquare } from 'lucide-react'
+import { ChevronRight, Compass, Library, MessagesSquare } from 'lucide-react'
 import { ChatPanel } from '@/components/ChatPanel'
+import { DecisionContent } from '@/components/DecisionPanel'
 import { LibraryContent } from '@/components/LibraryPanel'
 import { CHAT_PANEL_ENABLED } from '@/lib/flags'
 import { useStore } from '@/lib/store'
@@ -8,6 +9,7 @@ import { cn } from '@/lib/utils'
 const TAB = {
   chat: { label: 'chat', Icon: MessagesSquare },
   personas: { label: 'personas', Icon: Library },
+  decisions: { label: 'decisions', Icon: Compass },
 } as const
 
 /**
@@ -24,12 +26,14 @@ export function RightDock() {
   const toggle = useStore((s) => s.toggleLibrary)
   const stored = useStore((s) => s.rightTab)
   const setTab = useStore((s) => s.setRightTab)
-  // A canvas saved while the panel was showing chat still carries that tab.
-  const tab = CHAT_PANEL_ENABLED ? stored : 'personas'
-
-  const tabs = (CHAT_PANEL_ENABLED ? (['chat', 'personas'] as const) : (['personas'] as const)).map(
-    (key) => [key, TAB[key]] as const,
-  )
+  const keys = CHAT_PANEL_ENABLED
+    ? (['chat', 'personas', 'decisions'] as const)
+    : (['personas', 'decisions'] as const)
+  const tabs = keys.map((key) => [key, TAB[key]] as const)
+  // A canvas saved while the panel was showing chat still carries that tab, and
+  // the chat tab may no longer exist. Anything the dock cannot show falls back
+  // rather than rendering an empty panel under a highlighted tab.
+  const tab = (keys as readonly string[]).includes(stored) ? stored : 'personas'
 
   if (!open) {
     return (
@@ -77,7 +81,7 @@ export function RightDock() {
         </button>
       </header>
 
-      {tab === 'chat' ? <ChatPanel /> : <LibraryContent />}
+      {tab === 'chat' ? <ChatPanel /> : tab === 'decisions' ? <DecisionContent /> : <LibraryContent />}
     </aside>
   )
 }

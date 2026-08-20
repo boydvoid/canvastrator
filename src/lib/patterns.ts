@@ -237,6 +237,7 @@ export function patternBlock(planning: boolean): string {
     '- Do not add a reviewer, checker, or second opinion that the user did not ask for. If the work needs checking, say so and let them decide.',
     '- Do not split one coherent job across agents to look thorough. Reading three files is one agent\'s work, not three.',
     '- Do not fan out to "cover the angles" on a question that has one answer.',
+    '- Do not widen what was asked. A request that names an operation — push, commit, deploy, run the tests — is one step carrying the user\'s own instruction, and the turn ends when it is done. Anything you noticed along the way is worth *saying*, and is not yours to start.',
     `- Anything you can answer from this conversation — what the plan says, what a result meant, what you would do next — you answer. Do not write a ${write} for it.`,
     '',
     'Open your reply with exactly this line, before anything else:',

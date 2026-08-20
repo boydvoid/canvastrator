@@ -23,6 +23,7 @@ import { McpNode } from '@/components/nodes/McpNode'
 import { McpToolNode } from '@/components/nodes/McpToolNode'
 import { SessionNode } from '@/components/nodes/SessionNode'
 import { PlanStepNode } from '@/components/nodes/PlanStepNode'
+import { TerminalNode } from '@/components/nodes/TerminalNode'
 import { UsageNode } from '@/components/nodes/UsageNode'
 import { SkillNode } from '@/components/nodes/SkillNode'
 import {
@@ -42,9 +43,11 @@ import {
   discoverMcpServers,
   onSessionEvent,
   pickPath,
+  terminalLive,
 } from '@/lib/bridge'
 import {
   newCanvas,
+  beginLaunchRestore,
   restoreLastCanvas,
   watchCanvas,
   watchCompletion,
@@ -52,6 +55,7 @@ import {
 } from '@/lib/canvas'
 import { CHAT_PANEL_ENABLED } from '@/lib/flags'
 import { togglePanels, usePanels } from '@/lib/panels'
+import { pipeTerminals } from '@/lib/terminals'
 import { SHORTCUT_LABEL, keyToCanvasAction, shouldIgnoreShortcut } from '@/lib/shortcuts'
 import { useStore, type GtNode } from '@/lib/store'
 import { PROVIDER_ACCENT, PROVIDER_LABEL, type Provider } from '@/lib/types'
@@ -65,6 +69,7 @@ const nodeTypes: NodeTypes = {
   mcptool: McpToolNode,
   planstep: PlanStepNode,
   usage: UsageNode,
+  terminal: TerminalNode,
 }
 
 function Surface() {
@@ -95,6 +100,7 @@ function Surface() {
     addFolder,
     addFile,
     addUsage,
+    addTerminal,
   } =
     useStore.getState()
 
@@ -415,6 +421,9 @@ function Surface() {
             <ContextMenuItem onSelect={() => addUsage(screenToFlowPosition(menuAt))}>
               Usage
             </ContextMenuItem>
+            <ContextMenuItem onSelect={() => addTerminal(screenToFlowPosition(menuAt))}>
+              Terminal
+            </ContextMenuItem>
             <ContextMenuSub>
               <ContextMenuSubTrigger>MCP</ContextMenuSubTrigger>
               <ContextMenuSubContent className="max-h-72 overflow-y-auto">
@@ -476,13 +485,37 @@ export function Canvas() {
   useEffect(() => {
     void detectProviders().then(setProviders)
     void useStore.getState().initLibrary()
-    void defaultCwd().then(setCwd).then(restoreLastCanvas)
+    // `finally`, not `then`: a default cwd that fails to resolve used to take
+    // the restore down with it — the chain died, the canvas never reopened,
+    // and the next node minted a new one.
+    beginLaunchRestore()
+    void defaultCwd()
+      .then(setCwd)
+      .catch(() => {})
+      .finally(() => void restoreLastCanvas())
     const un = onSessionEvent((e) => applyEvent(e.sessionId, e.event))
+    // One listener for every terminal on the canvas, started here so a shell
+    // that outlives its view still has somewhere to put its output.
+    const stopTerminals = pipeTerminals()
+    // A shell the Rust side still has from before this mount — a dev reload,
+    // not a restart. The node data never carries `running` across a save, so
+    // without asking, a live terminal would show as closed.
+    void terminalLive()
+      .then((ids) => {
+        const st = useStore.getState()
+        for (const n of st.nodes) {
+          if (n.type === 'terminal' && ids.includes(n.data.terminalId)) {
+            st.patchTerminal(n.id, { running: true })
+          }
+        }
+      })
+      .catch(() => {})
     const stopWatching = watchCanvas()
     const stopLayout = watchLayout()
     const stopChime = watchCompletion()
     return () => {
       void un.then((f) => f())
+      stopTerminals()
       stopWatching()
       stopLayout()
       stopChime()
