@@ -1,3 +1,4 @@
+import type { Density } from './density'
 import type { PatternChoice } from './patterns'
 
 export type Provider = 'claude' | 'codex' | 'opencode'
@@ -327,6 +328,16 @@ export type SessionNodeData = {
   turnStartedAt?: number
   permission: Permission
   /**
+   * How much of this agent the node shows, when the user has said.
+   *
+   * Absent is the normal state and means "whatever the zoom asks for" — see
+   * `density.ts`. It is only ever set by a deliberate act on the node, and
+   * once set it survives any zoom, because a node you opened on purpose
+   * closing itself because you zoomed out to look at something else is the
+   * behaviour that makes a canvas feel like it is fighting you.
+   */
+  density?: Density
+  /**
    * This agent's standing brief, prepended to every turn.
    *
    * Used to live on a separate personality node wired into the session. That
@@ -393,15 +404,46 @@ export type SessionNodeData = {
 }
 
 /**
- * The usage panel, as a node.
+ * The readouts that float over the canvas rather than sitting on it.
  *
- * It holds no data of its own — every figure on it is read live off the
- * sessions, the same way a plan step node reads its step. Storing a copy would
- * create a second version of what a canvas has cost, and the two would disagree
- * within one turn. The id exists only so the node has an identity to persist
- * and delete by.
+ * Pulse, Usage and the persona library were nodes and drawers, which made them
+ * things you had to find: a node scrolls away with the canvas it is pinned to,
+ * and a drawer covers the work while you read it. None of the three describes
+ * anything *on* the canvas — they describe the canvas itself — so they live in
+ * screen space now, stacked in the corner, untouched by pan or zoom.
  */
-export type UsageNodeData = { usageId: string }
+export type PanelKey = 'pulse' | 'usage' | 'personas'
+
+/** Top to bottom, in the order they stack. */
+export const PANEL_KEYS: readonly PanelKey[] = ['pulse', 'usage', 'personas']
+
+/**
+ * `open` is whether the panel is on screen at all; `minimized` is whether it
+ * is showing as a header alone. They are separate because closing a panel must
+ * not throw away how you had it — reopening puts back the panel you left.
+ */
+export type PanelState = { open: boolean; minimized: boolean }
+
+export type Panels = Record<PanelKey, PanelState>
+
+/**
+ * Nothing open. The canvas is the point, and three panels over it on a first
+ * run would be three things to dismiss before you can see it.
+ */
+export const DEFAULT_PANELS: Panels = {
+  pulse: { open: false, minimized: false },
+  usage: { open: false, minimized: false },
+  personas: { open: false, minimized: false },
+}
+
+/**
+ * The Landing module, as a node.
+ *
+ * Holds an id and nothing else, like the other two modules: the files it lists
+ * are read off the canvas and the line counts off git, and a stored copy of
+ * either would be a second version of what changed.
+ */
+export type LandingNodeData = { landingId: string }
 
 /**
  * A real shell on the canvas.
@@ -525,6 +567,24 @@ export type PersonalityNodeData = {
  * history nobody was reading, and the nodes competed with the agents for
  * attention. A feed you open when you want it costs no canvas at all.
  */
+/**
+ * The kinds of thing the canvas records.
+ *
+ * `turn`, `question` and `error` are outcomes of a turn and are what the bell
+ * shows. The rest are the surrounding story — what you asked for, what shape
+ * the orchestrator chose, who it spawned, what got written — and exist so the
+ * Pulse module can answer "what is going on" without you opening agents one
+ * at a time. See `pulse.ts` for which kinds each surface admits.
+ */
+export type NotificationKind =
+  | 'turn'
+  | 'question'
+  | 'error'
+  | 'prompt'
+  | 'shape'
+  | 'spawned'
+  | 'wrote'
+
 export type Notification = {
   id: string
   /** The agent this is about, so clicking through opens the right chat. */
@@ -532,7 +592,7 @@ export type Notification = {
   sessionName: string
   provider: Provider
   /** `question` is a turn that ended waiting on the user — the urgent kind. */
-  kind: 'turn' | 'question' | 'error'
+  kind: NotificationKind
   /** What happened, in the agent's own words where there are any. */
   headline: string
   /** Distinct tool names the turn used, in first-use order. */
@@ -541,6 +601,19 @@ export type Notification = {
   ts: number
   read: boolean
 }
+
+/**
+ * Which drawer the rail is showing.
+ *
+ * `chat` names the retired docked chat panel. It stays in the union only
+ * because a canvas saved while that panel was showing still carries the value;
+ * nothing can select it any more, and the rail falls back rather than opening
+ * an empty drawer under a highlighted button. The conversation lives in the
+ * chatbox and, at full density, inside the agent's own node. The persona
+ * library used to be a drawer here too — it is a floating panel now, so it has
+ * no tab.
+ */
+export type RightTab = 'canvases' | 'decisions' | 'chat'
 
 export type SkillTrigger = 'on-attach' | 'manual' | 'always'
 

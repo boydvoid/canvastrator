@@ -35,7 +35,9 @@ import {
   type PatternId,
 } from './patterns'
 import { nextStep, parsePlan, planLive } from './plan'
-import { summarizeTurn } from './summary'
+import { headlineOf, summarizeTurn } from './summary'
+import type { Density } from './density'
+import { isBellKind } from './pulse'
 import {
   dedupeByName,
   loadLibrary,
@@ -44,9 +46,11 @@ import {
   type Persona,
 } from './library'
 import {
+  DEFAULT_PANELS,
   DEFAULT_ORCHESTRA,
   MODEL_OPTIONS,
   MODEL_TIERS,
+  PROVIDER_LABEL,
 } from './types'
 import type {
   AgentEvent,
@@ -57,20 +61,24 @@ import type {
   McpNodeData,
   McpServer,
   McpToolNodeData,
-  UsageNodeData,
   TerminalNodeData,
   Message,
   ModelOption,
   OrchestraPrefs,
   Permission,
+  Panels,
+  PanelKey,
   Plan,
   PlanStep,
   Provider,
   ProviderStatus,
+  LandingNodeData,
+  RightTab,
   SessionNodeData,
   SkillNodeData,
   SkillTrigger,
   Notification,
+  NotificationKind,
 } from './types'
 
 export type CanvasDialog = 'open' | 'save-as' | 'rules'
@@ -89,7 +97,7 @@ export type GtNode =
   | (Node<FileNodeData> & { type: 'file' })
   | (Node<McpNodeData> & { type: 'mcp' })
   | (Node<McpToolNodeData> & { type: 'mcptool' })
-  | (Node<UsageNodeData> & { type: 'usage' })
+  | (Node<LandingNodeData> & { type: 'landing' })
   | (Node<TerminalNodeData> & { type: 'terminal' })
 
 const uid = () => Math.random().toString(36).slice(2, 10)
@@ -137,9 +145,15 @@ type State = {
 
   /** Personas that outlive the canvas. Loaded from disk at startup. */
   library: Persona[]
-  /** The right dock: chat with an agent, or browse personas. */
+  /** The rail's drawer: the canvas list, or the decisions taken on this one. */
   libraryOpen: boolean
-  rightTab: 'chat' | 'personas' | 'decisions'
+  rightTab: RightTab
+  /**
+   * The floating readouts, and how each of them is showing. Saved with the
+   * canvas rather than with the window: which of them you keep open is a fact
+   * about the work on this canvas, not about this machine.
+   */
+  panels: Panels
   /** Session node the chat panel is pointed at. Falls back to the orchestrator. */
   chatTarget: string | null
 
@@ -158,6 +172,16 @@ type State = {
   setProviders: (p: ProviderStatus[]) => void
   setCwd: (c: string) => void
   select: (id: string | null) => void
+  /**
+   * Select exactly one node, the way a click on it would.
+   *
+   * Distinct from `select`, which records *which* node is the subject of the
+   * app's own bookkeeping. This writes React Flow's own `selected` flag, which
+   * is what draws the selection ring and what brings up a node's inspector —
+   * so it is the one to use when the app wants to show you a node rather than
+   * merely remember it.
+   */
+  focusNode: (id: string) => void
   openFile: (path: string | null) => void
 
   addSession: (provider: Provider, pos: { x: number; y: number }) => string
@@ -178,15 +202,21 @@ type State = {
   setPrimaryFolder: (sessionNodeId: string, folderNodeId: string) => void
   addFile: (path: string, pos: { x: number; y: number }, origin?: 'user' | 'agent') => string
   addMcp: (server: McpServer, pos: { x: number; y: number }) => string
+  /** Show a floating panel, or put it away again. */
+  togglePanel: (key: PanelKey) => void
+  /** Fold a panel down to its header, or open it back up. */
+  setPanelMinimized: (key: PanelKey, minimized: boolean) => void
   /**
-   * The usage panel. One per canvas — a second copy of the same live figures
-   * would be two things to move and nothing extra to read — so this returns
-   * the existing one when there is one.
+   * Put a panel in front of the user, whatever state it was in. For the places
+   * that answer a question with a panel — the title bar's readouts — where
+   * revealing a minimized header would not have answered it.
    */
-  addUsage: (pos: { x: number; y: number }) => string
+  showPanel: (key: PanelKey) => void
+  /** The Landing module. One per canvas, for the same reason as the others. */
+  addLanding: (pos: { x: number; y: number }) => string
   /**
    * A shell on the canvas. Several are fine — one per thing you are watching —
-   * unlike the usage panel, which has nothing to distinguish two copies.
+   * unlike the Landing module, which has nothing to distinguish two copies.
    */
   addTerminal: (pos: { x: number; y: number }) => string
   /**
@@ -197,6 +227,13 @@ type State = {
    * claiming a running shell would be wrong about the one thing it is for.
    */
   patchTerminal: (nodeId: string, patch: Partial<TerminalNodeData>) => void
+  /**
+   * Pin how much of an agent its node shows, or hand it back to the zoom.
+   *
+   * `undefined` is the release, not a fourth density — a node that has been
+   * released follows the zoom again, which is the state every node starts in.
+   */
+  setDensity: (nodeId: string, density: Density | undefined) => void
   initLibrary: () => Promise<void>
   setLibrary: (l: Persona[]) => Promise<void>
   toggleLibrary: () => void
@@ -248,7 +285,7 @@ type State = {
   setEffort: (nodeId: string, effort?: Effort) => void
   /** This agent's standing brief, prepended to every turn. */
   setInstructions: (nodeId: string, instructions: string) => void
-  setRightTab: (t: 'chat' | 'personas' | 'decisions') => void
+  setRightTab: (t: RightTab) => void
   setChatTarget: (nodeId: string | null) => void
 
   setCanvasDialog: (d: CanvasDialog | null) => void
@@ -934,7 +971,8 @@ export const useStore = create<State>((set, get) => ({
 
   library: [],
   libraryOpen: true,
-  rightTab: 'chat',
+  rightTab: 'canvases',
+  panels: { ...DEFAULT_PANELS },
   chatTarget: null,
   orchestra: { ...DEFAULT_ORCHESTRA },
   autoTidy: true,
@@ -1020,6 +1058,14 @@ export const useStore = create<State>((set, get) => ({
   setProviders: (providers) => set({ providers }),
   setCwd: (cwd) => set({ cwd }),
   select: (selectedId) => set({ selectedId }),
+
+  focusNode: (id) =>
+    set((s) => ({
+      selectedId: id,
+      nodes: s.nodes.map((n) =>
+        n.selected === (n.id === id) ? n : { ...n, selected: n.id === id },
+      ) as GtNode[],
+    })),
   openFile: (openFilePath) => set({ openFilePath }),
 
   addSession: (provider, pos) => {
@@ -1031,10 +1077,10 @@ export const useStore = create<State>((set, get) => ({
       id,
       type: 'session',
       position: pos,
-      // One size for every agent: the node is an identifier, and the work it
-      // is doing is read in the panel rather than inside the node.
-      width: SESSION_SIZE.w,
-      height: SESSION_SIZE.h,
+      // No declared box. An agent node picks its own width from its density
+      // and its height from what it has to say, and React Flow measures the
+      // result — so zooming out to glance costs no store write and cannot
+      // mark the canvas dirty.
       data: {
         sessionId,
         provider,
@@ -1054,6 +1100,13 @@ export const useStore = create<State>((set, get) => ({
       },
     }
     set((s) => ({ nodes: [...s.nodes, node], selectedId: id }))
+    logPulse(
+      id,
+      'spawned',
+      role === 'orchestrator'
+        ? `Orchestrator started on ${PROVIDER_LABEL[provider]}.`
+        : `Agent started on ${PROVIDER_LABEL[provider]}.`,
+    )
     return id
   },
 
@@ -1283,7 +1336,7 @@ export const useStore = create<State>((set, get) => ({
 
   tidy: (all = false) =>
     set((s) => {
-      const placed = layoutCanvas(s.nodes, s.edges, all ? undefined : s.autoPlaced)
+      const placed = layoutCanvas(s.nodes, s.edges, all ? undefined : s.autoPlaced, s.plan)
       return {
         nodes: s.nodes.map((n) =>
           placed[n.id] ? { ...n, position: placed[n.id] } : n,
@@ -1327,6 +1380,18 @@ export const useStore = create<State>((set, get) => ({
       ) as GtNode[],
     })),
 
+  setDensity: (nodeId, density) =>
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        if (n.id !== nodeId || !isSession(n)) return n
+        // Deleted rather than stored as undefined: a node with no pin and a
+        // node pinned to nothing are the same node, and writing the key would
+        // put a meaningless field in every saved canvas.
+        const { density: _drop, ...rest } = n.data
+        return { ...n, data: density ? { ...rest, density } : rest }
+      }) as GtNode[],
+    })),
+
   addTerminal: (pos) => {
     const id = `node_${uid()}`
     const taken = new Set(
@@ -1350,14 +1415,24 @@ export const useStore = create<State>((set, get) => ({
     return id
   },
 
-  addUsage: (pos) => {
-    const existing = get().nodes.find((n) => n.type === 'usage')
+  togglePanel: (key) =>
+    set((s) => ({
+      panels: { ...s.panels, [key]: { ...s.panels[key], open: !s.panels[key].open } },
+    })),
+
+  setPanelMinimized: (key, minimized) =>
+    set((s) => ({ panels: { ...s.panels, [key]: { ...s.panels[key], minimized } } })),
+
+  showPanel: (key) => set((s) => ({ panels: { ...s.panels, [key]: { open: true, minimized: false } } })),
+
+  addLanding: (pos) => {
+    const existing = get().nodes.find((n) => n.type === 'landing')
     if (existing) return existing.id
     const id = `node_${uid()}`
     set((s) => ({
       nodes: [
         ...s.nodes,
-        { id, type: 'usage', position: pos, data: { usageId: `usage_${uid()}` } } as GtNode,
+        { id, type: 'landing', position: pos, data: { landingId: `landing_${uid()}` } } as GtNode,
       ],
     }))
     return id
@@ -1804,6 +1879,10 @@ export const useStore = create<State>((set, get) => ({
     }
     const pending: Message = { id: uid(), role: 'assistant', text: '', tools: [], pending: true }
 
+    // What you asked for, in the feed alongside what came back. Without it the
+    // Pulse reads as a list of answers to questions nobody can see.
+    logPulse(nodeId, 'prompt', headlineOf(text))
+
     set((st) => ({
       nodes: st.nodes.map((n) =>
         n.id === nodeId && isSession(n)
@@ -2127,6 +2206,11 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
   const session = st.nodes.find((n) => n.id === sessionNodeId)
   if (!session) return
 
+  // A write is the only file touch worth a line in the feed. Reads are how an
+  // agent works; writes are what it changed, and are the thing you may want to
+  // revert. The edge and the node still record both.
+  if (write) logPulse(sessionNodeId, 'wrote', path)
+
   const existing = st.nodes.find((n) => n.type === 'file' && n.data.path === path)
   if (existing) {
     // Already on canvas: just refresh its state and make sure it's connected.
@@ -2219,6 +2303,50 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
  * the bell instead of onto the canvas, so a long-running canvas doesn't fill up
  * with history that nobody is reading.
  */
+/**
+ * Record something that happened, for the Pulse feed.
+ *
+ * `notifyTurn` is the turn-shaped version of this, and stays separate because
+ * a turn carries a tool list and a headline the *agent* wrote. Everything
+ * here is one line the app writes about itself: what you asked for, what shape
+ * was chosen, who got spawned, what got written.
+ */
+function logPulse(
+  sessionNodeId: string,
+  kind: NotificationKind,
+  headline: string,
+  fallback?: { name: string; provider: Provider },
+) {
+  const text = headline.trim()
+  if (!text) return
+  const session = useStore.getState().nodes.find((n) => n.id === sessionNodeId)
+  const who =
+    session && isSession(session)
+      ? { name: session.data.name, provider: session.data.provider }
+      : fallback
+  if (!who) return
+
+  const entry: Notification = {
+    id: uid(),
+    sessionNodeId,
+    sessionName: who.name,
+    provider: who.provider,
+    kind,
+    headline: text,
+    tools: [],
+    toolCount: 0,
+    ts: Date.now(),
+    // Only the kinds the bell shows can arrive unread. The rest are things
+    // you did, and a badge asking you to acknowledge your own prompt is one
+    // that never clears for a reason nobody wants.
+    read: !isBellKind(kind),
+  }
+
+  useStore.setState((s) => ({
+    notifications: [entry, ...s.notifications].slice(0, MAX_NOTIFICATIONS),
+  }))
+}
+
 function notifyTurn(sessionNodeId: string, msg: Message, awaitingUser: boolean) {
   const st = useStore.getState()
   const session = st.nodes.find((n) => n.id === sessionNodeId)
@@ -2750,6 +2878,11 @@ function proposePlan(fromNodeId: string, text: string) {
   // costs nothing: a plan with no shape runs in order, the safe reading.
   const chosen = parsePattern(text)
 
+  // The shape belongs in the feed as much as on the plan: it is the decision
+  // that explains why the next thing to happen is three agents rather than
+  // one, and it is made before any of them exist.
+  if (chosen) logPulse(fromNodeId, 'shape', `${chosen.id} — ${chosen.why}`)
+
   useStore.setState((s) => {
     const carry = s.plan && s.plan.fromNodeId === fromNodeId && planLive(s.plan.steps) ? s.plan : null
     if (carry) {
@@ -2946,4 +3079,21 @@ function handOver(toSessionId: string, fromSessionId: string) {
       },
     }
   })
+}
+
+/**
+ * A handle on the store from the browser console, in dev builds only.
+ *
+ * The app normally runs inside Tauri, where the console is awkward to reach
+ * and the interesting states — a squad mid-turn, an agent that failed, a full
+ * context window — take real money and real minutes to reach. Under `vite dev`
+ * the UI renders in an ordinary browser, and this makes those states one
+ * `setState` away, which is how the canvas gets looked at while it is being
+ * designed.
+ *
+ * Guarded on `import.meta.env.DEV`, so the whole block is dropped from a
+ * production bundle rather than shipping a way to rewrite the graph.
+ */
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  ;(window as unknown as { canvastrator?: unknown }).canvastrator = useStore
 }

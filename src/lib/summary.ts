@@ -1,3 +1,4 @@
+import { toPatternId } from './patterns'
 import type { Message } from './types'
 
 /** Long enough to say what happened, short enough to read at a glance. */
@@ -46,13 +47,23 @@ function clip(text: string, max: number): string {
  *
  * Code fences are dropped whole — a reply that opens with a diff or a
  * `canvastrator-persona` block is describing itself in the prose around it, not in
- * the fence. SPAWN and DELEGATE lines go too: they're instructions to
- * Canvastrator, not an account of the work.
+ * the fence. SPAWN, DELEGATE and PATTERN lines go too: they're instructions to
+ * Canvastrator, not an account of the work. A reply that opened with its shape
+ * used to headline the node with `PATTERN single: …`, which is the control
+ * line showing through as prose — the same defect the chat fixes by lifting it
+ * into a badge, on the surface you read at a glance.
+ *
+ * The shape is dropped only when its id is one of the six, matching what the
+ * badge lifts out: an id nothing recognises is not a directive, and on both
+ * surfaces it stays the visibly-wrong text the model actually wrote.
  */
 export function headlineOf(text: string): string {
   const prose = text
     .replace(/```[\s\S]*?(?:```|$)/g, '\n\n')
     .replace(/^\s*(?:SPAWN|DELEGATE)\s+[\w.-]+\s*:.*$/gim, '')
+    .replace(/^[ \t]*PATTERN[ \t]+([\w-]+)[ \t]*:[ \t]*\S.*$/gim, (line, id: string) =>
+      toPatternId(id) ? '' : line,
+    )
 
   for (const block of prose.split(/\n\s*\n/)) {
     const line = flatten(block)

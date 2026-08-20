@@ -19,6 +19,23 @@ import type { Plan, PlanStep } from './types'
 
 export const PLAN_STEP_SIZE = { w: 210, h: 74 }
 
+/**
+ * The shape card. Wider than a step because it carries a sentence of reasoning
+ * rather than a task line, and that sentence is the whole point of it.
+ *
+ * Declared rather than measured, like the step nodes and for the same reason:
+ * these are rebuilt from the plan on every render, so anything React Flow
+ * measures is thrown away on the next one — and a node it considers unmeasured
+ * is a node it draws with `visibility: hidden`.
+ */
+export const SHAPE_SIZE = { w: 300, h: 164 }
+
+/** Extra room for the mismatch warning, which is a paragraph when it appears. */
+const WARNING_H = 52
+
+/** Between the shape card and the first step it produced. */
+const SHAPE_GAP_X = 40
+
 /** Between one step and the next. */
 const GAP_X = 30
 /**
@@ -32,6 +49,11 @@ const LEAD_X = 150
  * the empty band above and the two never fight for the same space.
  */
 const RISE_Y = 80
+
+/** What a shape node carries. The plan itself is read live from the store. */
+export type ShapeNodeData = {
+  fromNodeId: string
+}
 
 /** What a step node carries. The step itself is read live from the store. */
 export type PlanStepNodeData = {
@@ -60,8 +82,12 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
   const anchor = nodes.find((n) => n.id === plan.fromNodeId)
   if (!anchor) return EMPTY
 
-  const anchorW = (anchor.width as number | undefined) ?? 260
-  const left = anchor.position.x + anchorW + LEAD_X
+  // The shape card sits directly above the orchestrator that chose it, and the
+  // steps run to its right. Read left to right, the band above the agent is
+  // the decision and then its consequences, which is the order they happened
+  // in — see `ShapeNode` for why the shape gets a card of its own at all.
+  const shapeLeft = anchor.position.x
+  const left = shapeLeft + SHAPE_SIZE.w + SHAPE_GAP_X + LEAD_X
   const top = anchor.position.y - PLAN_STEP_SIZE.h - RISE_Y
 
   const stepNodes: Node[] = plan.steps.map((step, i) => ({
@@ -87,18 +113,57 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
 
   const edges: Edge[] = []
 
-  // The orchestrator into the first step. `spawns` because that is what a step
-  // is: the handle a real child hangs off, holding the one not yet made.
+  // The shape, when the orchestrator declared one. A plan without one still
+  // runs — in order, the safe reading — so its absence is not an error and
+  // draws no card rather than a card that says "unknown".
+  const hasShape = !!plan.pattern
+  const shapeH = SHAPE_SIZE.h + (plan.warning ? WARNING_H : 0)
+  if (hasShape) {
+    stepNodes.unshift({
+      id: shapeNodeId(plan.fromNodeId),
+      type: 'shape',
+      position: {
+        x: shapeLeft,
+        // Bottom-aligned with the steps: the two are one row, and a card that
+        // is taller than a step must not push the row upward.
+        y: top + PLAN_STEP_SIZE.h - shapeH,
+      },
+      width: SHAPE_SIZE.w,
+      height: shapeH,
+      draggable: false,
+      selectable: false,
+      deletable: false,
+      data: { fromNodeId: plan.fromNodeId } satisfies ShapeNodeData,
+    })
+  }
+
+  // Into the first step, from the shape card where there is one. `spawns`
+  // because that is what a step is: the handle a real child hangs off, holding
+  // the one not yet made.
   edges.push({
     id: `planlead_${plan.fromNodeId}_${plan.steps[0].id}`,
-    source: plan.fromNodeId,
-    sourceHandle: 'spawns',
+    source: hasShape ? shapeNodeId(plan.fromNodeId) : plan.fromNodeId,
+    sourceHandle: hasShape ? 'shape-out' : 'spawns',
     target: planNodeId(plan.steps[0].id),
     targetHandle: 'step-in',
     type: 'plan',
     selectable: false,
     deletable: false,
   })
+
+  // The orchestrator up into the card, so the decision is visibly its.
+  if (hasShape) {
+    edges.push({
+      id: `planshape_${plan.fromNodeId}`,
+      source: plan.fromNodeId,
+      sourceHandle: 'spawns',
+      target: shapeNodeId(plan.fromNodeId),
+      targetHandle: 'shape-in',
+      type: 'plan',
+      selectable: false,
+      deletable: false,
+    })
+  }
 
   // Step to step, which is the running order made visible.
   for (let i = 1; i < plan.steps.length; i++) {
@@ -143,3 +208,6 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
  * because these are merged into the same array React Flow is given.
  */
 export const planNodeId = (stepId: string) => `plannode_${stepId}`
+
+/** The canvas id for the shape card, one per plan, keyed by its author. */
+export const shapeNodeId = (fromNodeId: string) => `shapenode_${fromNodeId}`

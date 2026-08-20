@@ -138,6 +138,55 @@ describe('orchestra preferences', () => {
   })
 })
 
+describe('the floating panels', () => {
+  it('round-trips which are open and which are folded away', () => {
+    const panels = {
+      pulse: { open: true, minimized: false },
+      usage: { open: true, minimized: true },
+      personas: { open: false, minimized: false },
+    }
+    const back = deserializeCanvas(
+      JSON.parse(JSON.stringify(serializeCanvas({ ...snapshot([]), panels }))),
+    )
+    expect(back.panels).toEqual(panels)
+  })
+
+  it('opens a canvas saved before they existed with nothing showing', () => {
+    const back = deserializeCanvas({ ...serializeCanvas(snapshot([])), panels: undefined })
+    expect(back.panels).toEqual({
+      pulse: { open: false, minimized: false },
+      usage: { open: false, minimized: false },
+      personas: { open: false, minimized: false },
+    })
+  })
+
+  it('ignores a panel this build does not have, and a flag that is not one', () => {
+    // As a hand-edited file, or one from a build that knew a fourth panel,
+    // would carry it — hence the cast through unknown.
+    const data = {
+      ...serializeCanvas(snapshot([])),
+      panels: { pulse: { open: 'yes' }, landing: { open: true } },
+    } as unknown as CanvasData
+    const panels = deserializeCanvas(data).panels
+    expect(panels?.pulse).toEqual({ open: false, minimized: false })
+    expect(panels).not.toHaveProperty('landing')
+  })
+
+  it('drops Pulse and Usage nodes from a canvas saved while they were nodes', () => {
+    const data = {
+      nodes: [
+        session('a'),
+        { id: 'p1', type: 'pulse', position: { x: 0, y: 0 }, data: { pulseId: 'pulse_1' } },
+        { id: 'u1', type: 'usage', position: { x: 0, y: 0 }, data: { usageId: 'usage_1' } },
+      ],
+      edges: [{ id: 'e1', source: 'a', target: 'p1', type: 'context' }],
+    } as unknown as CanvasData
+    const after = deserializeCanvas(data)
+    expect(after.nodes.map((n) => n.id)).toEqual(['a'])
+    expect(after.edges).toEqual([])
+  })
+})
+
 describe('deserializeCanvas', () => {
   it('round-trips a canvas', () => {
     const before = {

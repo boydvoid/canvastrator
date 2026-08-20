@@ -9,19 +9,30 @@ export type CanvasAction =
   | 'folder'
   | 'file'
   | 'skill'
+  | 'terminal'
+  | 'pulse'
+  | 'usage'
+  | 'personas'
   | 'tidy'
   | 'rules'
   | 'delete'
 
 /**
  * First letter wherever it is free; a mnemonic where it collides. File takes
- * "d" for document because folder already owns "f".
+ * "d" for document because folder already owns "f", and the persona panel
+ * takes "l" for the library it shows — "p" belongs to Pulse.
  */
 const KEYS: Record<string, CanvasAction> = {
   s: 'session',
   f: 'folder',
   d: 'file',
   k: 'skill',
+  e: 'terminal',
+  // The three panels toggle: they are screen furniture rather than nodes, so
+  // a second press of the key that showed one puts it away again.
+  p: 'pulse',
+  u: 'usage',
+  l: 'personas',
   t: 'tidy',
   g: 'rules',
   delete: 'delete',
@@ -34,6 +45,10 @@ export const SHORTCUT_LABEL: Record<CanvasAction, string> = {
   folder: 'F',
   file: 'D',
   skill: 'K',
+  terminal: 'E',
+  pulse: 'P',
+  usage: 'U',
+  personas: 'L',
   tidy: 'T',
   rules: 'G',
   delete: '⌫',
@@ -41,6 +56,8 @@ export const SHORTCUT_LABEL: Record<CanvasAction, string> = {
 
 type KeyEventLike = {
   key: string
+  /** The physical key, needed where a modifier changes what `key` reports. */
+  code?: string
   metaKey?: boolean
   ctrlKey?: boolean
   altKey?: boolean
@@ -77,4 +94,19 @@ export function shouldIgnoreShortcut(target: unknown): boolean {
   if (el.tagName && TYPING_TAGS.has(el.tagName.toUpperCase())) return true
   if (el.isContentEditable) return true
   return typeof el.closest === 'function' ? el.closest(OFF_LIMITS) != null : false
+}
+
+/**
+ * ⌥1 / ⌥2 / ⌥3 — pin every agent, or every *selected* agent, to one density.
+ *
+ * Held rather than typed, because it overrides the zoom and an override you
+ * trip by accident is one you then have to find and undo. Returns null for
+ * anything else, including a bare digit: a canvas is not a numbered list.
+ */
+export function keyToDensity(e: KeyEventLike & { shiftKey?: boolean }): 'glance' | 'summary' | 'full' | null {
+  if (!e.altKey || e.metaKey || e.ctrlKey) return null
+  // Option-digit produces a different character on a Mac keyboard — ⌥1 is ¡ —
+  // so the digit has to come from the physical key, not from what was typed.
+  const digit = e.code?.match(/^Digit([123])$/)?.[1] ?? e.key
+  return digit === '1' ? 'glance' : digit === '2' ? 'summary' : digit === '3' ? 'full' : null
 }

@@ -33,7 +33,7 @@ const {
   restoreLastCanvas,
   newCanvas,
 } = await import('./canvas')
-const { deleteCanvasDoc, loadCanvasDoc } = await import('./bridge')
+const { deleteCanvasDoc, listCanvases, loadCanvasDoc } = await import('./bridge')
 const { useStore } = await import('./store')
 
 const node = (id: string) =>
@@ -283,6 +283,53 @@ describe('reopening without duplicating', () => {
     expect(useStore.getState().canvasError).toBeNull()
 
     // A first run in every respect, so a new canvas is exactly right here.
+    useStore.setState({ nodes: [node('a')] as never })
+    await vi.waitFor(() => expect(saved.docs).toHaveLength(1), { timeout: 3000 })
+    stop()
+  })
+
+  it('reopens the newest canvas on disk when the pointer is gone', async () => {
+    // The pointer lives in the webview's localStorage, which does not survive
+    // everything the files do. Without this the app opened on a blank
+    // "untitled" and minted a whole new canvas for it, once per launch.
+    vi.mocked(listCanvases).mockResolvedValueOnce([
+      { id: 'canvas_old', name: 'older', updatedAt: 10, version: 1, nodes: 4 },
+      { id: 'canvas_recent', name: 'mine', updatedAt: 99, version: 1, nodes: 3 },
+      // Empty, and newer than either: reopening one of these looks exactly
+      // like the bug, so it is skipped.
+      { id: 'canvas_blank', name: 'untitled', updatedAt: 500, version: 1, nodes: 0 },
+    ])
+    vi.mocked(loadCanvasDoc).mockResolvedValue({
+      id: 'canvas_recent',
+      name: 'mine',
+      updatedAt: 99,
+      version: 1,
+      data: { nodes: [node('a')], edges: [] },
+    } as never)
+
+    beginLaunchRestore()
+    const stop = watchCanvas()
+    expect(await restoreLastCanvas()).toBe(true)
+
+    const s = useStore.getState()
+    expect(s.canvasId).toBe('canvas_recent')
+    expect(s.canvasName).toBe('mine')
+    expect(s.canvasError).toBeNull()
+
+    // And an edit goes back into that canvas rather than minting a new one.
+    useStore.setState({ nodes: [node('a'), node('b')] as never })
+    await vi.waitFor(() => expect(saved.docs).toHaveLength(1), { timeout: 3000 })
+    expect(saved.docs[0].id).toBe('canvas_recent')
+    stop()
+  })
+
+  it('still starts fresh when there is nothing on disk to fall back to', async () => {
+    beginLaunchRestore()
+    const stop = watchCanvas()
+    expect(await restoreLastCanvas()).toBe(false)
+    expect(useStore.getState().canvasId).toBeNull()
+
+    // A genuine first run still gets its one starting canvas.
     useStore.setState({ nodes: [node('a')] as never })
     await vi.waitFor(() => expect(saved.docs).toHaveLength(1), { timeout: 3000 })
     stop()

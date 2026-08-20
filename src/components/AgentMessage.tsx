@@ -1,91 +1,114 @@
-import { Sparkles, UserRoundPlus } from 'lucide-react'
+import { GitBranch, Layers, Repeat2, Signpost, Sparkles, UserRoundPlus, Workflow } from 'lucide-react'
+import { useState } from 'react'
 import { Markdown } from '@/components/Markdown'
+import { splitAgentText } from '@/lib/patternline'
+import type { PatternId } from '@/lib/patterns'
 import { useStore } from '@/lib/store'
 import { PROVIDER_ACCENT, type Provider } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
 /**
  * An orchestrator's reply is part prose and part machinery. Rendered as plain
- * markdown, a `SPAWN` line and a persona definition read as noise the user is
- * supposed to ignore — worse, the definition dumps raw YAML into the chat.
- * They're actions, so they get rendered as actions.
+ * markdown, a `PATTERN` line, a `SPAWN` line and a persona definition all read
+ * as noise the user is supposed to ignore — worse, the definition dumps raw
+ * YAML into the chat and the shape it chose wraps as body text above the reply
+ * it governs. They're decisions and actions, so they get rendered as such.
+ *
+ * The splitting is in `@/lib/patternline`, tested without a DOM. What's left
+ * here is only how each piece looks.
  */
-
-type Segment =
-  | { kind: 'prose'; text: string }
-  | { kind: 'spawn'; name: string; task: string }
-  | { kind: 'persona'; name: string; fields: Record<string, string>; brief: string }
-
-const SPAWN_LINE = /^[ \t]*(SPAWN|DELEGATE)[ \t]+([\w.-]+)[ \t]*:[ \t]*/i
-const PERSONA_FENCE = /```canvastrator-persona\s*\n([\s\S]*?)```/gi
 
 /**
- * Split a reply into prose and directives.
+ * The shape, drawn as one chip.
  *
- * The task on a `SPAWN` runs to the end of the reply or to the next directive,
- * matching how the store parses it — the card must show exactly what the child
- * was actually sent, not a prettier summary of it.
+ * Every part of it is derived from `src/lib/patterns.ts` and the palette — the
+ * glyph and the accent carry the rung, so six replies in a scrollback are
+ * distinguishable before a word of the rationale is read.
  */
-export function splitAgentText(text: string): Segment[] {
-  const out: Segment[] = []
-  let rest = text
+const PATTERN_GLYPH: Record<PatternId, typeof Layers> = {
+  single: Layers,
+  chain: GitBranch,
+  route: Signpost,
+  parallel: Workflow,
+  orchestrate: Sparkles,
+  evaluate: Repeat2,
+}
 
-  // Persona definitions first: they're fenced, so their boundaries are exact.
-  const fences: { start: number; end: number; seg: Segment }[] = []
-  for (const m of rest.matchAll(PERSONA_FENCE)) {
-    const body = m[1]
-    const cut = body.search(/^\s*---\s*$/m)
-    const head = cut === -1 ? body : body.slice(0, cut)
-    const brief = cut === -1 ? '' : body.slice(cut).replace(/^\s*---\s*$/m, '').trim()
-    const fields: Record<string, string> = {}
-    for (const line of head.split('\n')) {
-      const kv = line.match(/^\s*([a-z_]+)\s*:\s*(.*)$/i)
-      if (kv) fields[kv[1].toLowerCase()] = kv[2].trim()
-    }
-    if (fields.name) {
-      fences.push({
-        start: m.index ?? 0,
-        end: (m.index ?? 0) + m[0].length,
-        seg: { kind: 'persona', name: fields.name, fields, brief },
-      })
-    }
-  }
+/**
+ * Written out rather than built from the id: Tailwind drops a theme variable
+ * nothing references, and `var(--color-pattern-${id})` is invisible to it — the
+ * six accents fell out of the stylesheet and the badges rendered colourless.
+ * The literal names are what keeps them in the build, and the `Record` is what
+ * makes a seventh pattern a type error here instead of a blank chip.
+ */
+const PATTERN_ACCENT: Record<PatternId, string> = {
+  single: 'var(--color-pattern-single)',
+  chain: 'var(--color-pattern-chain)',
+  route: 'var(--color-pattern-route)',
+  parallel: 'var(--color-pattern-parallel)',
+  orchestrate: 'var(--color-pattern-orchestrate)',
+  evaluate: 'var(--color-pattern-evaluate)',
+}
 
-  let cursor = 0
-  const pushProse = (chunk: string) => {
-    if (chunk.trim()) out.push({ kind: 'prose', text: chunk.trim() })
-  }
+function PatternBadge({ id, label, why }: { id: PatternId; label: string; why: string }) {
+  const Glyph = PATTERN_GLYPH[id]
+  return (
+    <div
+      className="my-1.5 flex items-start gap-2 rounded-lg border border-line bg-surface/40 px-2 py-1.5"
+      style={{ '--accent': PATTERN_ACCENT[id] } as React.CSSProperties}
+      title={label}
+    >
+      <span
+        className="mt-px flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[10.5px] tracking-wide uppercase"
+        style={{
+          color: 'var(--accent)',
+          background: 'color-mix(in oklch, var(--accent) 12%, transparent)',
+          boxShadow: 'inset 0 0 0 1px color-mix(in oklch, var(--accent) 30%, transparent)',
+        }}
+      >
+        <Glyph size={11} className="shrink-0" />
+        {id}
+      </span>
+      <p className="min-w-0 flex-1 text-[11.5px] leading-snug text-fg-muted">{why}</p>
+    </div>
+  )
+}
 
-  const emitWithSpawns = (chunk: string) => {
-    const lines = chunk.split('\n')
-    let buffer: string[] = []
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(SPAWN_LINE)
-      if (!m) {
-        buffer.push(lines[i])
-        continue
-      }
-      pushProse(buffer.join('\n'))
-      buffer = []
-      // Everything after the directive belongs to it, until the next one.
-      const first = lines[i].slice(m[0].length)
-      const task: string[] = first ? [first] : []
-      while (i + 1 < lines.length && !SPAWN_LINE.test(lines[i + 1])) {
-        task.push(lines[++i])
-      }
-      out.push({ kind: 'spawn', name: m[2], task: task.join('\n').trim() })
-    }
-    pushProse(buffer.join('\n'))
-  }
+/**
+ * The brief the child was sent, clamped until asked for.
+ *
+ * A spawn task runs to the end of the reply and is routinely several
+ * paragraphs — printed in full it buries the conversation it sits in, and the
+ * user scrolls past the orchestrator's own words to reach the next turn. Two
+ * lines is enough to recognise which agent this is; the rest is there when the
+ * question is what exactly it was told.
+ */
+function SpawnTask({ task }: { task: string }) {
+  const [open, setOpen] = useState(false)
+  // Cheap and deliberate: the clamp is the real test, and this only decides
+  // whether to offer the control. A task that fits in two lines never does.
+  const long = task.length > 140 || task.split('\n').length > 2
 
-  for (const f of fences) {
-    emitWithSpawns(rest.slice(cursor, f.start))
-    out.push(f.seg)
-    cursor = f.end
-  }
-  emitWithSpawns(rest.slice(cursor))
-
-  return out
+  return (
+    <div className="px-2 py-1.5">
+      <p
+        className={cn(
+          'text-[11.5px] leading-snug whitespace-pre-wrap text-fg-muted',
+          long && !open && 'line-clamp-2',
+        )}
+      >
+        {task}
+      </p>
+      {long && (
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="mt-1 font-mono text-[10px] text-fg-faint hover:text-fg-muted"
+        >
+          {open ? '▴ less' : '▾ full task'}
+        </button>
+      )}
+    </div>
+  )
 }
 
 function SpawnCard({ name, task }: { name: string; task: string }) {
@@ -142,9 +165,7 @@ function SpawnCard({ name, task }: { name: string; task: string }) {
           </span>
         )}
       </div>
-      <p className="px-2 py-1.5 text-[11.5px] leading-snug whitespace-pre-wrap text-fg-muted">
-        {task}
-      </p>
+      <SpawnTask task={task} />
     </div>
   )
 }
@@ -212,6 +233,8 @@ export function AgentMessage({
   return (
     <div className="min-w-0">
       {segments.map((seg, i) => {
+        if (seg.kind === 'pattern')
+          return <PatternBadge key={i} id={seg.id} label={seg.label} why={seg.why} />
         if (seg.kind === 'spawn') return <SpawnCard key={i} name={seg.name} task={seg.task} />
         if (seg.kind === 'persona')
           return <PersonaCard key={i} name={seg.name} fields={seg.fields} brief={seg.brief} />

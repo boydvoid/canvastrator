@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { FilePlus2, Layers, PanelLeftClose, Trash2 } from 'lucide-react'
+import { FilePlus2, Layers, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   deleteCanvas,
@@ -122,20 +122,15 @@ function Row({
 }
 
 /**
- * Saved canvases, always on screen. The dialog behind ⌘O still exists for
- * managing them in bulk; this is the everyday switcher — one click, and you
- * can see what else is there without opening anything.
+ * Saved canvases, as a drawer's contents.
+ *
+ * This was a column that held the left edge of the window at all times. A list
+ * you consult a few times a day does not earn two hundred pixels of every
+ * session, so it moved into a drawer off the rail — the same body, opened when
+ * it is wanted and gone when it is not. The dialog behind ⌘O still exists for
+ * managing canvases in bulk; this is the everyday switcher.
  */
-export function Sidebar({
-  collapsed,
-  onToggle,
-  width,
-}: {
-  collapsed: boolean
-  onToggle: () => void
-  /** Owned by `panels.ts` — the divider beside this column writes it. */
-  width: number
-}) {
+export function CanvasesContent() {
   const canvasId = useStore((s) => s.canvasId)
   const canvasName = useStore((s) => s.canvasName)
   const savedAt = useStore((s) => s.canvasSavedAt)
@@ -153,34 +148,13 @@ export function Sidebar({
   // the row you're looking at, and the first save adds a row outright.
   useEffect(refresh, [refresh, canvasId, savedAt, canvasName])
 
-  if (collapsed) return null
-
   // A canvas with work in it but no file yet has no row of its own; show it
   // where it will land, so the list isn't missing what's on screen.
   const unsaved = !canvasId && nodeCount > 0
 
   return (
-    <aside
-      className="gt-sidebar flex h-full shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel"
-      style={{ width }}
-    >
-      <header className="flex shrink-0 items-center gap-2 px-3 pt-2.5 pb-1.5">
-        <span className="font-mono text-[10px] tracking-widest text-fg-muted uppercase">
-          Canvases
-        </span>
-        <span className="font-mono text-[10px] text-fg-faint">{list?.length || ''}</span>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="ml-auto h-5 w-5"
-          title="Hide sidebar  ⌘B"
-          onClick={onToggle}
-        >
-          <PanelLeftClose size={12} />
-        </Button>
-      </header>
-
-      <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-1.5 pb-2">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-1.5 py-2">
         {unsaved && (
           <div className="flex items-center gap-2 rounded-md bg-veil-strong px-2 py-1">
             <Layers size={11} className="shrink-0 text-fg-muted" />
@@ -209,7 +183,7 @@ export function Sidebar({
         ))}
       </div>
 
-      <footer className="shrink-0 border-t border-veil-line px-1.5 py-1.5">
+      <footer className="shrink-0 border-t border-line-soft px-1.5 py-1.5">
         <Button
           variant="ghost"
           size="xs"
@@ -222,6 +196,6 @@ export function Sidebar({
           <p className="px-2 pt-1 font-mono text-[10px] text-fg-faint">saved {timeAgo(savedAt)}</p>
         )}
       </footer>
-    </aside>
+    </div>
   )
 }

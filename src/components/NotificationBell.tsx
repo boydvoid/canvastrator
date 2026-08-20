@@ -6,6 +6,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { timeAgo } from '@/lib/ago'
+import { isBellKind } from '@/lib/pulse'
 import { useStore } from '@/lib/store'
 import { PROVIDER_ACCENT } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -20,7 +21,13 @@ import { cn } from '@/lib/utils'
  * when you come back.
  */
 export function NotificationBell() {
-  const notifications = useStore(useShallow((s) => s.notifications))
+  // The feed the bell draws from is now the whole Pulse log — prompts you
+  // typed, agents you spawned, files that were written. The bell keeps its
+  // original meaning: things that happened while you were looking elsewhere.
+  // The rest of the log is the Pulse module's to show.
+  const notifications = useStore(
+    useShallow((s) => s.notifications.filter((n) => isBellKind(n.kind))),
+  )
   const markRead = useStore((s) => s.markNotificationsRead)
   const clear = useStore((s) => s.clearNotifications)
   const setChatTarget = useStore((s) => s.setChatTarget)

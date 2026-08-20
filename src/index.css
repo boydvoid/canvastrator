@@ -71,6 +71,23 @@
      server, saved canvas — and `danger` is one that failed. */
   --color-live: oklch(0.80 0.17 145);
   --color-danger: oklch(0.65 0.20 25);
+
+  /* One accent per orchestration shape, for the badge that opens a reply.
+     Derived, not chosen: every one of these is an existing accent or a mix of
+     two, so re-pointing the palette re-points these with it and the light
+     theme needs no override.
+
+     The order is the ladder in `src/lib/patterns.ts`, and the ramp says what
+     the ladder says — a cool green at rung 1, where one agent does the job,
+     warming rung by rung to the red at rung 6, where the job has been handed
+     to a squad. Cost is the thing the user is being asked to read at a
+     glance, so cost is what the hue tracks. */
+  --color-pattern-single: var(--color-live);
+  --color-pattern-chain: var(--color-codex);
+  --color-pattern-route: var(--color-opencode);
+  --color-pattern-parallel: var(--color-claude);
+  --color-pattern-orchestrate: color-mix(in oklch, var(--color-claude) 55%, var(--color-danger));
+  --color-pattern-evaluate: var(--color-danger);
 }
 
 /* ── Light theme ──────────────────────────────────────────────────────────
@@ -166,19 +183,15 @@ body {
 .react-flow__node {
   cursor: default;
 }
-/* An agent node is a label with a two-line stream window under it. Pinned here
-   as well as on the node so a canvas saved before the size existed opens at
-   the right one. */
-.react-flow__node-session {
-  width: 260px;
-  height: 106px;
-}
-/* Files are chips. Sized here rather than on each node so the layout's idea of
-   a file's box and the rendered box can't drift apart. */
-.react-flow__node-file {
-  width: 196px;
-  height: 38px;
-}
+/* Agent nodes are deliberately *not* sized here. They pick their own width
+   from their density and their height from what they have to say, and React
+   Flow measures the result — see `density.ts`. A rule here would pin every
+   agent to one box and quietly clip the two densities that need more room. */
+/* Files are chips that size to their own name. A fixed width made a column of
+   short names look like a column of half-empty boxes, and the widest name in a
+   grid is what the layout needs to know anyway — which it gets by measuring.
+   `FILE_SIZE` in `layout.ts` remains the nominal box for a chip that has not
+   been rendered yet. */
 
 /* Selecting a node answers "what is this wired to?": its connectors and their
    far ends stay lit, everything else steps back. Opacity rather than colour,

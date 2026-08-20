@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDown, ChevronDown, ChevronUp, Cpu, Hexagon, SlidersHorizontal } from 'lucide-react'
+import { useReactFlow } from '@xyflow/react'
+import { ArrowDown, ChevronDown, ChevronUp, Cpu, Crosshair, Hexagon } from 'lucide-react'
 import { Composer } from '@/components/Composer'
-import { PlanPanel } from '@/components/PlanPanel'
 import { TerminalView } from '@/components/TerminalView'
 import { RunningStatus } from '@/components/RunningStatus'
-import { Bubble, EffortMenu, FolderMenu, ModelMenu, SessionSettings } from '@/components/ChatPanel'
+import { Bubble, EffortMenu, FolderMenu, ModelMenu } from '@/components/ChatPanel'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -174,8 +174,23 @@ function OrchestraMenu({ fallback }: { fallback: Provider }) {
  * the same window in the same place — only the contents differ, and two copies
  * of this string would drift the moment one of them was adjusted.
  */
+/**
+ * Bottom right, and small.
+ *
+ * Centred and 46rem wide, this sat squarely over the middle of the canvas —
+ * the part you are actually arranging — and a canvas you have to talk *around*
+ * is one the box is fighting. The corner is the one region no layout puts
+ * anything in: the flow reads left to right and top to bottom, agents fan
+ * downward from their orchestrator, and the modules sit where they are placed.
+ * The other bottom corner already belongs to the zoom controls.
+ *
+ * Capped in height as well as width, and anchored at the bottom so it grows
+ * *upward* as the transcript fills it. Without a ceiling it grew past the top
+ * of the canvas and clipped, and everything above that edge was unreachable —
+ * not scrolled to, not clickable.
+ */
 const BOX =
-  'pointer-events-auto absolute bottom-4 left-1/2 z-20 flex max-h-[calc(100%-2rem)] w-[min(46rem,calc(100%-3rem))] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-xl backdrop-blur'
+  'pointer-events-auto absolute right-4 bottom-4 z-20 flex max-h-[min(34rem,calc(100%-2rem))] w-[min(26rem,calc(100%-2rem))] flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-xl backdrop-blur'
 
 export function CentralChat() {
   const nodes = useStore((s) => s.nodes)
@@ -186,9 +201,9 @@ export function CentralChat() {
   const chatTarget = useStore((s) => s.chatTarget)
   const setChatTarget = useStore((s) => s.setChatTarget)
   const send = useStore((s) => s.send)
+  const { fitView } = useReactFlow()
   const interrupt = useStore((s) => s.interrupt)
   const setPermission = useStore((s) => s.setPermission)
-  const plan = useStore((s) => s.plan)
 
   const sessions = useMemo(
     () => nodes.filter((n): n is GtNode & { type: 'session' } => n.type === 'session'),
@@ -212,7 +227,6 @@ export function CentralChat() {
 
   // Collapsed by default: this is configuration, and the conversation is why
   // the box is on screen at all.
-  const [showSettings, setShowSettings] = useState(false)
   // The transcript folds away, not the box — a chatbox you can't type into is
   // a chatbox that isn't there.
   const [open, setOpen] = useState(true)
@@ -276,15 +290,7 @@ export function CentralChat() {
 
   return (
     // Typing to an agent must never trip a canvas shortcut.
-    <div
-      data-shortcuts="off"
-      // Capped to the canvas it floats over. Anchored at the bottom, the box
-      // grows *upward* as the plan and the transcript fill it — and with no
-      // ceiling it grew straight past the top of the canvas, which clips it.
-      // Everything above that edge was then unreachable: not scrolled to, not
-      // clickable, and the plan waiting to be approved is what sits up there.
-      className={BOX}
-    >
+    <div data-shortcuts="off" className={BOX}>
       {/* who you're talking to */}
       <div className="flex shrink-0 items-center gap-1.5 border-b border-line-soft px-2.5 py-1.5">
         <DropdownMenu>
@@ -326,10 +332,6 @@ export function CentralChat() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <ModelMenu node={active} />
-        <EffortMenu node={active} />
-        <FolderMenu node={active} />
-
         <div className="ml-auto flex shrink-0 items-center gap-1">
           <OrchestraMenu fallback={d.provider} />
           <button
@@ -354,15 +356,18 @@ export function CentralChat() {
               {d.notice.label}
             </span>
           )}
+          {/* The settings used to unfold inside this box. They live beside
+              the agent's node now, so this goes there instead of opening a
+              second copy of them here — see `Inspector`. */}
           <button
-            onClick={() => setShowSettings((v) => !v)}
-            title={showSettings ? 'Hide settings' : 'Name, access, standing brief'}
-            className={cn(
-              'shrink-0 rounded p-1 hover:bg-surface',
-              showSettings ? 'text-fg' : 'text-fg-subtle hover:text-fg-muted',
-            )}
+            onClick={() => {
+              useStore.getState().focusNode(active.id)
+              void fitView({ nodes: [{ id: active.id }], duration: 420, maxZoom: 1, padding: 0.6 })
+            }}
+            title="Show this agent on the canvas, with its settings"
+            className="shrink-0 rounded p-1 text-fg-subtle hover:bg-surface hover:text-fg-muted"
           >
-            <SlidersHorizontal size={12} />
+            <Crosshair size={12} />
           </button>
           <button
             onClick={() => setOpen((v) => !v)}
@@ -374,11 +379,18 @@ export function CentralChat() {
         </div>
       </div>
 
-      {showSettings && <SessionSettings node={active} />}
-
-      {/* The plan sits with the agent that wrote it — it is that
-          conversation's proposal, not the canvas's. */}
-      {plan?.fromNodeId === active.id && <PlanPanel plan={plan} />}
+      {/* What the next turn runs as, on a line of its own.
+          These share the header at a wider box, but at this width the agent's
+          name, three menus and the controls above cannot all keep their labels
+          — and the first thing to give was the name, which is the one thing
+          the row exists to say. They are per-turn settings and belong with the
+          composer; the same values are also on the node's inspector, which is
+          where you change them for the agent rather than for this message. */}
+      <div className="flex shrink-0 items-center gap-1 border-b border-line-soft px-2 py-1">
+        <ModelMenu node={active} />
+        <EffortMenu node={active} />
+        <FolderMenu node={active} />
+      </div>
 
       {busy && (
         <div className="shrink-0 border-b border-line-soft px-2.5 py-1">
@@ -408,7 +420,7 @@ export function CentralChat() {
           <div
             ref={scrollRef}
             onScroll={onScroll}
-            className="max-h-[42vh] min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
+            className="max-h-[24vh] min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
           >
             {d.messages.length === 0 && (
               <p className="py-6 text-center font-mono text-[11px] text-fg-faint">
@@ -440,9 +452,11 @@ export function CentralChat() {
           // when it's deleted. The remount drops the draft too, which is the
           // same bargain and the less surprising one.
           key={d.sessionId}
-          placeholder={
-            busy ? 'running…' : `Message ${d.name}   ↵ send · ⇧↵ newline · / commands · @ files`
-          }
+          // Just the name. The box is 26rem wide now and the full hint list
+          // wrapped to two lines, which made the field look like it already
+          // had something in it — and a placeholder that reads as content is
+          // worse than one that says less. The hints are in the footer.
+          placeholder={busy ? 'running…' : `Message ${d.name}…`}
           busy={busy}
           sessionId={d.sessionId}
           cwd={cwd}
@@ -458,6 +472,11 @@ export function CentralChat() {
             {cwd ? `▸ ${cwd.split('/').filter(Boolean).pop()}` : '▸ no folder'}
           </span>
           {extraFolders > 0 && <span className="shrink-0">+{extraFolders}</span>}
+          {/* `/` and `@` reveal themselves the moment you type them, and ↵ to
+              send needs no telling. Shift-↵ for a newline is the one that has
+              to be said, because the alternative is losing a half-written
+              paragraph to find out. */}
+          <span className="shrink-0">⇧↵ newline</span>
           <span className="ml-auto shrink-0">
             {d.usage.outputTokens > 0 && `${d.usage.outputTokens} out`}
             {d.usage.costUsd > 0 && ` · $${d.usage.costUsd.toFixed(3)}`}

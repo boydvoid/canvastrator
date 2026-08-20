@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Edge } from '@xyflow/react'
-import { boxOf, findFreeSpot, layoutCanvas, sizeOf } from './layout'
+import { boxOf, findFreeSpot, layoutCanvas, SESSION_SIZE, sequenceEdges, sizeOf } from './layout'
 import type { GtNode } from './store'
 
 const session = (id: string, x = 0, y = 0): GtNode =>
@@ -308,14 +308,22 @@ describe('findFreeSpot', () => {
 })
 
 describe('sizeOf', () => {
-  it('prefers a measured size, falls back per node type', () => {
-    // The helper hands sessions a measured size; strip it to see the fallback.
-    const measured = session('s', 0, 0)
-    expect(sizeOf(measured)).toEqual({ w: 260, h: 64 })
-    expect(sizeOf({ ...measured, width: undefined, height: undefined } as GtNode)).toEqual({
-      w: 260,
-      h: 106,
+  it('prefers a declared size, then a measured one, then the type default', () => {
+    // The helper hands sessions a declared size; strip it to see each tier.
+    const declared = session('s', 0, 0)
+    expect(sizeOf(declared)).toEqual({ w: 260, h: 64 })
+
+    // Agent nodes size themselves from their density, so they declare nothing
+    // and React Flow's measurement is the truth for them.
+    const bare = { ...declared, width: undefined, height: undefined } as GtNode
+    expect(sizeOf({ ...bare, measured: { width: 300, height: 412 } } as GtNode)).toEqual({
+      w: 300,
+      h: 412,
     })
+
+    // Nothing declared and nothing measured — a node placed before it has ever
+    // been on screen. The summary density is what to assume.
+    expect(sizeOf(bare)).toEqual({ w: SESSION_SIZE.w, h: SESSION_SIZE.h })
     expect(sizeOf(file('f'))).toEqual({ w: 196, h: 38 })
   })
 })
@@ -361,5 +369,116 @@ describe('layoutCanvas — ownership', () => {
     const nodes = [session('s1', 10, 20), file('f', 30, 40)]
     const placed = layoutCanvas(nodes, [edge('s1', 'f', 'file')], new Set())
     expect(Object.keys(placed)).toEqual([])
+  })
+})
+
+describe('shape drives the ranking', () => {
+  const plan = (patternId: string, childIds: (string | undefined)[], warning?: string) =>
+    ({
+      fromNodeId: 'root',
+      goal: 'g',
+      proposedAt: 0,
+      pattern: { id: patternId, why: 'because' },
+      steps: childIds.map((childId, i) => ({
+        id: `step${i}`,
+        persona: 'p',
+        task: 't',
+        state: 'done' as const,
+        ...(childId ? { childId } : {}),
+      })),
+      ...(warning ? { warning } : {}),
+    }) as never
+
+  const squad = () => ({
+    nodes: [session('root'), session('a'), session('b'), session('c')],
+    edges: [
+      edge('root', 'a', 'spawn'),
+      edge('root', 'b', 'spawn'),
+      edge('root', 'c', 'spawn'),
+    ],
+  })
+
+  it('fans a parallel plan into one column beside the orchestrator', () => {
+    const { nodes, edges } = squad()
+    const p = layoutCanvas(nodes, edges, undefined, plan('parallel', ['a', 'b', 'c']))
+    // They started together, so they share an x and differ in y.
+    expect(p.a.x).toBe(p.b.x)
+    expect(p.b.x).toBe(p.c.x)
+    expect(new Set([p.a.y, p.b.y, p.c.y]).size).toBe(3)
+  })
+
+  it('chains a sequential plan left to right', () => {
+    const { nodes, edges } = squad()
+    const p = layoutCanvas(nodes, edges, undefined, plan('chain', ['a', 'b', 'c']))
+    // Each waited for the one before it, and the picture says so.
+    expect(p.a.x).toBeLessThan(p.b.x)
+    expect(p.b.x).toBeLessThan(p.c.x)
+  })
+
+  it('leaves the column alone when there is no plan', () => {
+    const { nodes, edges } = squad()
+    const p = layoutCanvas(nodes, edges)
+    expect(p.a.x).toBe(p.b.x)
+    expect(p.b.x).toBe(p.c.x)
+  })
+
+  it('follows how the plan runs, not what it was labelled', () => {
+    // A shape the app demoted runs its steps in order regardless of the label,
+    // and the geometry must agree with what is happening.
+    const { nodes, edges } = squad()
+    const p = layoutCanvas(
+      nodes,
+      edges,
+      undefined,
+      plan('parallel', ['a', 'b', 'c'], 'four steps is not a fan-out'),
+    )
+    expect(p.a.x).toBe(p.b.x)
+  })
+
+  it('ignores steps that never spawned anything', () => {
+    const { nodes, edges } = squad()
+    const p = layoutCanvas(nodes, edges, undefined, plan('chain', ['a', undefined, 'c']))
+    expect(p.a.x).toBeLessThan(p.c.x)
+  })
+
+  it('does not chain a plan of one', () => {
+    const { nodes, edges } = squad()
+    expect(() => layoutCanvas(nodes, edges, undefined, plan('chain', ['a']))).not.toThrow()
+  })
+})
+
+describe('sequenceEdges', () => {
+  const byId = new Map([
+    ['a', session('a')],
+    ['b', session('b')],
+    ['f', file('f')],
+  ])
+  const mk = (id: string, childIds: (string | undefined)[]) =>
+    ({
+      fromNodeId: 'root',
+      goal: '',
+      proposedAt: 0,
+      pattern: { id, why: '' },
+      steps: childIds.map((childId, i) => ({
+        id: `s${i}`,
+        persona: 'p',
+        task: 't',
+        state: 'done' as const,
+        ...(childId ? { childId } : {}),
+      })),
+    }) as never
+
+  it('is empty without a plan, or without a declared shape', () => {
+    expect(sequenceEdges(null, byId)).toEqual([])
+    expect(sequenceEdges({ steps: [], fromNodeId: 'r', goal: '', proposedAt: 0 } as never, byId)).toEqual([])
+  })
+
+  it('is empty for a fan-out', () => {
+    expect(sequenceEdges(mk('parallel', ['a', 'b']), byId)).toEqual([])
+  })
+
+  it('drops a childId whose node is gone, or is not an agent', () => {
+    expect(sequenceEdges(mk('chain', ['a', 'ghost', 'b']), byId)).toEqual(['a', 'b'])
+    expect(sequenceEdges(mk('chain', ['a', 'f', 'b']), byId)).toEqual(['a', 'b'])
   })
 })

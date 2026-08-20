@@ -122,3 +122,48 @@ export function fmtUsd(n: number): string {
   if (n < 1) return `$${n.toFixed(3)}`
   return `$${n.toFixed(2)}`
 }
+
+/**
+ * What the canvas is spending, per ten minutes.
+ *
+ * A total answers "what did this cost" after the fact. While a squad is
+ * running, the question is whether to let it keep going, and that is a rate.
+ * Ten minutes rather than an hour because that is roughly the length of a
+ * task you would let run unattended — an hourly figure asks you to divide.
+ *
+ * Null under a minute of elapsed time: a rate extrapolated from twenty seconds
+ * of a squad's first turn is a number with no information in it, and showing
+ * one that swings by an order of magnitude every few seconds trains people to
+ * ignore the field.
+ */
+export const BURN_WINDOW_MS = 10 * 60 * 1000
+const MIN_ELAPSED_MS = 60 * 1000
+
+export function burnRate(costUsd: number, elapsedMs: number): number | null {
+  if (!Number.isFinite(elapsedMs) || elapsedMs < MIN_ELAPSED_MS) return null
+  return (costUsd / elapsedMs) * BURN_WINDOW_MS
+}
+
+/**
+ * Each agent's share of the spend, largest first.
+ *
+ * Ordered by cost rather than by name or by spawn order: the reason to look at
+ * this is to find the agent that ran away with the budget, and putting it
+ * anywhere but first makes you read the whole list to find it.
+ */
+export type Share = { id: string; name: string; provider: Provider; costUsd: number; fraction: number }
+
+export function spendByAgent(sessions: SessionLike[]): Share[] {
+  const total = sessions.reduce((a, s) => a + s.usage.costUsd, 0)
+  return sessions
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      provider: s.provider,
+      costUsd: s.usage.costUsd,
+      // Zero total means every share is zero, not NaN — a fresh canvas draws
+      // an empty bar rather than nothing at all.
+      fraction: total > 0 ? s.usage.costUsd / total : 0,
+    }))
+    .sort((a, b) => b.costUsd - a.costUsd)
+}

@@ -1,6 +1,9 @@
 import dagre from '@dagrejs/dagre'
 import type { Edge } from '@xyflow/react'
+import { DENSITY_SIZE } from './density'
+import { pattern as patternOf } from './patterns'
 import type { GtNode } from './store'
+import type { Plan } from './types'
 
 /**
  * Laying out a Canvastrator canvas is not a generic graph problem — the graph
@@ -40,6 +43,14 @@ import type { GtNode } from './store'
  * file, which is what keeps files in a strip under their agent instead of
  * fanned across a rank as siblings.
  *
+ * The one thing that is *not* generic: when a plan is running, the shape it
+ * declared decides how its agents are ranked. A fan-out puts them in one
+ * column beside the orchestrator, because they started together; a sequence
+ * chains them left to right, because each waited for the one before it. See
+ * `sequenceEdges` — the geometry follows how the plan actually runs, not what
+ * it was labelled, so a shape the app demoted does not draw a promise the
+ * runtime is not keeping.
+ *
  * One wrinkle worth knowing: the strip is not symmetric about its session —
  * supports above and files below are rarely the same height. Dagre centres a
  * node against its rank by the *box* it was given, so the box reserves the
@@ -75,17 +86,23 @@ const SIBLING_GAP_Y = 52
 /** Between an MCP server and the column of tool nodes it feeds. */
 const SATELLITE_GAP_X = 28
 
-/** An agent node is a label with a two-line stream window under it: one fixed
- *  size, everywhere. */
-export const SESSION_SIZE = { w: 260, h: 106 }
+/**
+ * The box the layout assumes an agent needs.
+ *
+ * A hint, not a rule: agent nodes size themselves from their own density and
+ * content now, so the real box comes from what React Flow measured. This is
+ * what to assume for a node that has never been rendered — a step in a plan,
+ * or a child placed the instant it is spawned.
+ */
+export const SESSION_SIZE = DENSITY_SIZE.summary
 /** A file is a chip. There are a lot of them, and they stack. */
 export const FILE_SIZE = { w: 196, h: 38 }
 
 /** A terminal is a label with a line of its last output under it. */
 export const TERMINAL_SIZE = { w: 240, h: 64 }
 
-/** The usage panel. Wide enough for a name, a meter and two numbers per row. */
-export const USAGE_SIZE = { w: 300, h: 180 }
+/** The Landing list. A row per file written, so it grows with the run. */
+export const LANDING_SIZE = { w: 330, h: 260 }
 
 /** Fallback sizes for nodes React Flow hasn't measured yet. */
 const DEFAULT_SIZE: Record<GtNode['type'], { w: number; h: number }> = {
@@ -95,13 +112,22 @@ const DEFAULT_SIZE: Record<GtNode['type'], { w: number; h: number }> = {
   skill: { w: 240, h: 190 },
   mcp: { w: 240, h: 150 },
   mcptool: { w: 208, h: 52 },
-  usage: USAGE_SIZE,
+  landing: LANDING_SIZE,
   terminal: TERMINAL_SIZE,
 }
 
+/**
+ * How big a node actually is.
+ *
+ * Declared size first, because a node given one is meant to hold it. Then
+ * whatever React Flow measured, which is the truth for every node that sizes
+ * itself from its content — agent nodes, since they gained densities, and the
+ * modules. The nominal table is the last resort: a node placed before it has
+ * ever been on screen has nothing else to go on.
+ */
 export const sizeOf = (n: GtNode) => ({
-  w: (n.width as number | undefined) ?? DEFAULT_SIZE[n.type]?.w ?? 240,
-  h: (n.height as number | undefined) ?? DEFAULT_SIZE[n.type]?.h ?? 120,
+  w: (n.width as number | undefined) ?? n.measured?.width ?? DEFAULT_SIZE[n.type]?.w ?? 240,
+  h: (n.height as number | undefined) ?? n.measured?.height ?? DEFAULT_SIZE[n.type]?.h ?? 120,
 })
 
 export const boxOf = (n: GtNode): Box => ({ x: n.position.x, y: n.position.y, ...sizeOf(n) })
@@ -286,6 +312,28 @@ const stackHeight = (heights: number[], gap: number) =>
  * Arrange the whole canvas. Returns positions rather than nodes so the caller
  * decides how to apply them.
  */
+/**
+ * The agents a running plan produced, in the order its steps ran.
+ *
+ * Only for a plan that runs its steps one after another. A fan-out's children
+ * genuinely did start together and belong in a column; chaining them would
+ * draw a queue that never existed.
+ *
+ * A shape the app demoted — `plan.warning` — is deliberately not treated as
+ * its declared self: the steps are running in order regardless of the label,
+ * and the picture must agree with what is happening rather than with what was
+ * claimed.
+ */
+export function sequenceEdges(plan: Plan | null | undefined, byId: Map<string, GtNode>): string[] {
+  if (!plan?.pattern) return []
+  if (patternOf(plan.pattern.id).run !== 'sequence') return []
+  const kids = plan.steps
+    .map((step) => step.childId)
+    .filter((id): id is string => !!id && byId.get(id)?.type === 'session')
+  // A chain of one is a chain in name only, and pairs are what this returns.
+  return kids.length >= 2 ? kids : []
+}
+
 export function layoutCanvas(
   nodes: GtNode[],
   edges: Edge[],
@@ -296,6 +344,11 @@ export function layoutCanvas(
    * explicit "tidy all" wants.
    */
   movable?: ReadonlySet<string>,
+  /**
+   * The plan in flight, when there is one. Its shape decides whether the
+   * agents it produced read as a column or as a chain — see `sequenceEdges`.
+   */
+  plan?: Plan | null,
 ): Placement {
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const { outputs, supports, shared, children, orphans } = group(nodes, edges)
@@ -375,6 +428,16 @@ export function layoutCanvas(
     for (const kid of kids) if (g.hasNode(kid)) spawnEdges.push([parent, kid])
   }
   for (const [parent, kid] of spawnEdges.reverse()) g.setEdge(parent, kid)
+
+  // The shape, as ranking. A sequence puts each agent one rank to the right of
+  // the one it waited for, so a chain reads left to right instead of stacking
+  // into a column that says nothing about the order it ran in. The spawn edges
+  // above stay — the orchestrator really did create all of them — and dagre
+  // resolves the two constraints together.
+  const chain = sequenceEdges(plan, byId)
+  for (let i = 1; i < chain.length; i++) {
+    if (g.hasNode(chain[i - 1]) && g.hasNode(chain[i])) g.setEdge(chain[i - 1], chain[i])
+  }
 
   // Dagre breaks cycles itself, so a spawn loop can't hang the layout.
   dagre.layout(g)

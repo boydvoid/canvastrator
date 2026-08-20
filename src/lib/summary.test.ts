@@ -28,6 +28,22 @@ describe('headlineOf', () => {
     expect(headlineOf('DELEGATE tester: run the suite')).toBe('')
   })
 
+  it('skips the PATTERN line, which is a decision rather than an account', () => {
+    // The chat lifts this line into a badge; a node that headlines with it is
+    // the same control line showing through as prose.
+    expect(
+      headlineOf('PATTERN single: one specialist holds this.\n\nThe tests pass.'),
+    ).toBe('The tests pass.')
+  })
+
+  it('keeps a PATTERN line whose id is not one of the six', () => {
+    // Same rule as the badge: an id nothing recognises is not a directive, so
+    // it stays the visibly-wrong text the model actually wrote.
+    expect(headlineOf('PATTERN swarm: everyone at once.\n\nThe tests pass.')).toBe(
+      'PATTERN swarm: everyone at once.',
+    )
+  })
+
   it('cuts a long reply on a sentence boundary', () => {
     const head = `${'Traced the persona pipeline end to end. '.repeat(5)}Then wrote it up.`
     const out = headlineOf(head)

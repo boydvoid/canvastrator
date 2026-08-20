@@ -1,13 +1,15 @@
 import type { Edge } from '@xyflow/react'
-import { SESSION_SIZE } from './layout'
 import { reconcileFolderEdges, type GtNode } from './store'
 import {
   DEFAULT_ORCHESTRA,
+  DEFAULT_PANELS,
   MODEL_TIERS,
+  PANEL_KEYS,
   type ContextEntry,
   type Message,
   type Notification,
   type OrchestraPrefs,
+  type Panels,
   type PersonalityNodeData,
   type Plan,
 } from './types'
@@ -60,6 +62,8 @@ export type CanvasData = {
   orchestra?: OrchestraPrefs
   /** A plan the user hasn't finished with. */
   plan?: Plan | null
+  /** Which floating readouts are showing, and which are folded to a header. */
+  panels?: Panels
 }
 
 /** The slice of the store a canvas is made of. */
@@ -74,6 +78,11 @@ export type CanvasSnapshot = {
   notifications: Notification[]
   planning: boolean
   plan: Plan | null
+  /**
+   * Optional for the same reason as `orchestra`: a partial snapshot built by a
+   * test predates the field, and absent means "however the panels start".
+   */
+  panels?: Panels
   /**
    * Optional so a caller that predates the preference — the tests, and any
    * partial snapshot — still type-checks; absent saves as "no preference",
@@ -170,6 +179,7 @@ export function serializeCanvas(s: CanvasSnapshot): CanvasData {
     // A step that was mid-flight when the app closed is pending again: its
     // agent is gone with the process, and a step stuck on "running" for ever
     // is worse than one the user has to approve twice.
+    panels: { ...DEFAULT_PANELS, ...(s.panels ?? {}) },
     plan: s.plan
       ? {
           ...s.plan,
@@ -215,6 +225,25 @@ function readOrchestra(raw: OrchestraPrefs | undefined): OrchestraPrefs {
   }
 }
 
+/**
+ * Panel prefs, key by key. A hand-edited file or one from a build that knew a
+ * panel this one doesn't must never put a key the stack can't render into the
+ * store, and a missing panel takes its default rather than opening as
+ * `undefined`.
+ */
+function readPanels(raw: Panels | undefined): Panels {
+  const flag = (v: unknown, fallback: boolean) => (typeof v === 'boolean' ? v : fallback)
+  return Object.fromEntries(
+    PANEL_KEYS.map((key) => [
+      key,
+      {
+        open: flag(raw?.[key]?.open, DEFAULT_PANELS[key].open),
+        minimized: flag(raw?.[key]?.minimized, DEFAULT_PANELS[key].minimized),
+      },
+    ]),
+  ) as Panels
+}
+
 export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSnapshot {
   const nodes = (data?.nodes ?? []).filter(
     (n): n is SavedNode => !!n && typeof n.id === 'string' && typeof n.type === 'string',
@@ -223,7 +252,11 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
   // what the first kind held; a turn summary is only worth reading while the
   // turn is recent, so those simply go. The attach and summary edges that
   // wired them in fall out with the dangling-edge filter below.
-  .filter((n) => !['personality', 'summary'].includes(n.type as string))
+  // Pulse and Usage are floating panels now rather than nodes. A canvas saved
+  // while either was on it opens without them — the panels say the same thing,
+  // and they hold nothing of the user's that could be rescued. Their ids fall
+  // out of `autoPlaced` and any edge drawn to them below.
+  .filter((n) => !['personality', 'summary', 'pulse', 'usage'].includes(n.type as string))
 
   const ids = new Set(nodes.map((n) => n.id))
 
@@ -236,12 +269,14 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
       ...(n.height ? { height: n.height } : {}),
       data: n.data,
     } as GtNode
-    // Agent nodes used to be resizable transcript windows, so canvases saved
-    // then carry whatever size the user dragged them to. They are labels
-    // now: one size, or an old canvas opens full of empty boxes.
-    if (node.type === 'session') {
-      node.width = SESSION_SIZE.w
-      node.height = SESSION_SIZE.h
+    // Agent nodes have carried two different sizing regimes: resizable
+    // transcript windows, then one fixed label size. File chips carried a
+    // third, a fixed 196×38 box. All three now size themselves — an agent from
+    // its density, a chip from its own name — so a saved box of any vintage is
+    // a box the node would not choose. Drop it and let them measure.
+    if (node.type === 'session' || node.type === 'file') {
+      delete node.width
+      delete node.height
     }
     // Belt and braces: files written before settleSession existed, or edited
     // by hand, must still open in a usable state.
@@ -285,6 +320,9 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
     // carry a tier that is no longer offered, and a preference must never put
     // a value the pickers cannot show back into the store.
     orchestra: readOrchestra(data?.orchestra),
+    // Absent in canvases saved before the panels floated; those open with
+    // nothing showing, which is what a canvas that never had them looked like.
+    panels: readPanels(data?.panels),
     plan:
       data?.plan && Array.isArray(data.plan.steps) && data.plan.steps.length
         ? {

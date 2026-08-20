@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { band, canvasUsage, contextUse, fmtTokens, fmtUsd, type SessionLike } from './usage'
+import {
+  band,
+  burnRate,
+  BURN_WINDOW_MS,
+  canvasUsage,
+  contextUse,
+  fmtTokens,
+  fmtUsd,
+  spendByAgent,
+  type SessionLike,
+} from './usage'
 
 const session = (over: Partial<SessionLike> = {}): SessionLike => ({
   id: 'n1',
@@ -107,5 +117,51 @@ describe('formatting', () => {
     expect(fmtUsd(0.0004)).toBe('$0.0004')
     expect(fmtUsd(0.512)).toBe('$0.512')
     expect(fmtUsd(12.3456)).toBe('$12.35')
+  })
+})
+
+describe('burnRate', () => {
+  it('is null until there is enough elapsed time to state a rate', () => {
+    // A figure extrapolated from twenty seconds of a squad's first turn swings
+    // by an order of magnitude every few seconds, which trains people to
+    // ignore the field.
+    expect(burnRate(1, 20_000)).toBeNull()
+    expect(burnRate(1, 59_999)).toBeNull()
+    expect(burnRate(1, 60_000)).not.toBeNull()
+  })
+
+  it('reports spend per ten minutes', () => {
+    expect(burnRate(0.5, BURN_WINDOW_MS)).toBeCloseTo(0.5)
+    expect(burnRate(0.5, BURN_WINDOW_MS / 2)).toBeCloseTo(1)
+  })
+
+  it('refuses a nonsense window rather than returning Infinity', () => {
+    expect(burnRate(1, 0)).toBeNull()
+    expect(burnRate(1, Number.NaN)).toBeNull()
+  })
+})
+
+describe('spendByAgent', () => {
+  const agent = (id: string, costUsd: number): SessionLike => ({
+    id,
+    name: id,
+    provider: 'claude',
+    usage: { costUsd, inputTokens: 0, outputTokens: 0 },
+  })
+
+  it('puts the agent that ran away with the budget first', () => {
+    const shares = spendByAgent([agent('a', 0.1), agent('b', 0.9), agent('c', 0.5)])
+    expect(shares.map((s) => s.id)).toEqual(['b', 'c', 'a'])
+    expect(shares[0].fraction).toBeCloseTo(0.6)
+  })
+
+  it('gives every share a zero fraction rather than NaN on a fresh canvas', () => {
+    // The bar draws empty; it must not draw nothing at all.
+    const shares = spendByAgent([agent('a', 0), agent('b', 0)])
+    expect(shares.every((s) => s.fraction === 0)).toBe(true)
+  })
+
+  it('is empty for a canvas with no agents', () => {
+    expect(spendByAgent([])).toEqual([])
   })
 })

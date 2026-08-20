@@ -28,7 +28,8 @@ the agent runs.
 
 | | |
 | --- | --- |
-| **Session nodes** | Right-click → spawn Claude / Codex / opencode. Unavailable CLIs are greyed out, detected at startup. |
+| **Session nodes** | Double-click empty canvas for the spawn ring, or right-click to pick a provider. Unavailable CLIs are greyed out, detected at startup. |
+| **Node densities** | One agent node, three amounts of truth. Zoomed out it says its name and one live verb — `editing store.ts`, `waiting on you`. At working zoom it adds the last turn in the agent's own words, the tools it used, and what it cost. Double-click opens its transcript in place. Zoom picks between the first two; a node you open stays open. |
 | **Folder nodes** | A directory on the canvas. Wire it into a session to set that session's cwd. One folder can drive several sessions; a session with no folder refuses to run rather than defaulting somewhere surprising. |
 | **File nodes** | Wire a file into a session to inject its contents as context (budget-capped, re-read fresh each turn). |
 | **Files map themselves** | When an agent reads or writes a file, a file node appears wired back to that agent — green edge for a write, dashed grey for a read. The canvas becomes a live picture of who touched what. |
@@ -36,17 +37,21 @@ the agent runs.
 | **Progress notices** | When the provider's API is overloaded and the CLI is backing off, the node shows `retry 3/10` with the reason. Silence during a 40-second backoff is indistinguishable from a hung agent. |
 | **Session continuity** | Each turn is a fresh process resumed via the provider's own session id, so conversations persist. |
 | **Tool visibility** | Tool calls appear inline in the transcript as they happen. |
-| **Cost + tokens** | Tracked per session and totalled on the canvas. |
+| **Usage panel** | A floating panel: total spend, burn rate per ten minutes, each agent's share, and how full every context window is — the one number that decides whether a long run survives. |
+| **Pulse panel** | A floating panel: one line per thing that happened, across every agent. Prompts, shapes chosen, turns landed, questions asked, files written. Clicking an entry flies the viewport to the node it happened on. |
+| **Landing module** | A node you place: every file the agents wrote, with lines added and removed against your last commit. Click a row to read the change hunk by hunk, and revert a hunk at a time. |
+| **⌘K** | Spawn a persona, run anything that acts on the whole canvas, or jump to any node by name. |
 | **Interrupt** | Kills the in-flight turn. |
 | **File viewer / editor** | Click a file node to open it: Monaco for code, a plain text box for `.txt`, inline rendering for images and PDFs. Edit and save with ⌘S. |
 | **Canvas autosave** | The graph, transcripts, context bus, and watermarks are written to disk as you work — debounced, atomic, and starting from the first node rather than waiting for a manual save. Reopens where you left off. |
 | **Switch canvases** | Click the canvas name in the top bar: every saved canvas is listed with its node count — one click to switch. Rename, Save-a-copy and New live in the same menu. |
 | **Permissions** | Per-session badge in the header, cycling read-only → auto → full. Defaults to **auto**, so agents can edit files *and* run their build. |
 | **Shared context** | Wire session → session; the target receives the source's turn summaries injected into its next prompt, watermarked so nothing is delivered twice. |
-| **Persona library** | A right sidebar of reusable agent archetypes, saved to disk outside any canvas. Every orchestrator can spawn them; spawning one drops its node onto the canvas. Ships with reviewer / implementer / investigator / researcher. |
+| **Persona library** | Reusable agent archetypes, saved to disk outside any canvas, in a floating panel off the rail. Every orchestrator can spawn them; spawning one drops its node onto the canvas. Ships with reviewer / implementer / investigator / researcher. |
 | **Personality nodes** | Named agent archetypes — provider, model, permission tier, and an opening brief. Wire one into an orchestrator and that orchestrator may instantiate it on demand. |
 | **Orchestrator spawns children** | `SPAWN <personality>: <task>` creates a real new session in the same folder, wired for context both ways, runs the task, and reports back. |
-| **Shape before spawn** | The orchestrator declares which of six orchestration shapes the job has — single agent, chain, routing, parallel, orchestrator-worker, evaluator-optimizer — cheapest that fits, and says why not the cheaper one. The plan panel shows the choice, and a plan that says its steps are independent actually runs them at once. |
+| **Shape before spawn** | The orchestrator declares which of six orchestration shapes the job has — single agent, chain, routing, parallel, orchestrator-worker, evaluator-optimizer — cheapest that fits, and says why not the cheaper one. The choice lands on the canvas as a card with the shape drawn as a glyph, the steps it produced running to its right, and approve/discard on it. A plan that says its steps are independent actually runs them at once. |
+| **Inspector** | Select an agent and its controls appear beside it — model, effort, folder, access, and what is wired in. It follows the node when dragged. Select two and you get two, side by side, saying how they differ. |
 | **Spawn policy via skills** | A skill on the orchestrator says *when* to spawn — "if the user asks for a poem, spawn the haiku-writer" — so routing is something you define, not something hardcoded. |
 | **Agent → agent delegation** | The orchestrator can hand a task to another agent, get the answer back, and continue. Hop-limited. |
 | **Skill nodes** | Write instructions, pick a trigger, wire to a session; they're injected into that agent. |
@@ -113,9 +118,162 @@ src/
   Canvas.tsx           React Flow surface + context menu
   lib/store.ts         graph, context bus, turn lifecycle, delegation
   lib/types.ts         shared vocabulary
-  components/nodes/    SessionNode (chat) · SkillNode · FolderNode · FileNode
+  components/nodes/    SessionNode · SkillNode · FolderNode · FileNode · LandingNode
+  components/panels/   Pulse · Usage · Personas, floating over the bottom-left
   components/edges.tsx context · attach · call · cwd · file
+  components/LeftRail  the one piece of permanent chrome; drawers float over the canvas
+  lib/density.ts       how much of an agent a node shows, derived from zoom
+  lib/liveverb.ts      what an agent is doing, in three words
+  lib/pulse.ts         the canvas-wide event feed, and the bell's filter over it
 ```
+
+### The canvas is the app
+
+The window used to be a canvas with three panels bolted around it: saved canvases held
+the left edge, the persona library held the right, and the agent's conversation lived in
+whichever of them had been clicked last. Each panel was a permanent answer to a question
+asked a few times an hour, and together they took roughly seven hundred pixels of every
+session away from the thing the app is for.
+
+Now there is one rail, fifty-two pixels wide. What the panels held is behind it as
+drawers that float over the canvas and close on Esc — not modals, because you drag a
+persona out of one onto the canvas, and that cannot work through a scrim. Everything
+else moved onto the canvas itself or behind a keystroke:
+
+| Was | Is now | Why |
+| --- | --- | --- |
+| Left sidebar · canvases | ⌘K, and a rail drawer | A list you open twice a day should not cost 200px forever. |
+| Right dock · personas | A floating panel over the corner | A persona is only useful once it is a node, and you have to see where that node lands. |
+| Top bar · cost & context | Usage panel | A number that decides whether a run survives deserves a surface, not a footnote. |
+| Docked chat panel | The node, at full density | The transcript belongs to the agent, not to a corner of the window. |
+| Plan panel | Shape card + the steps beside it | A plan you can read in the geometry needs no panel to restate it. |
+| Session settings panel | The inspector, beside the node | One panel can only ever describe one agent. |
+| Nothing | Pulse panel | Nothing ever said what the *canvas* was doing. |
+
+**Creation is one gesture.** Double-click empty canvas and seven options appear in a ring
+around the cursor — Agent, Folder, File, Terminal, Skill, MCP, Landing. A ring
+rather than a menu because the gesture means "I want a thing *here*", and a menu that
+drops down and to the right answers "here" with "somewhere below and to the right of
+here". The node lands exactly where the ring opened.
+
+**⌘K is the impermanent panel.** Spawn a persona, run the handful of things that act on
+the whole canvas, or jump to any node by name — then it is gone and the canvas has the
+window back. Jumping by name is the half that could not exist before: on a canvas of
+thirty nodes the only way to reach one was to find it by eye at a zoom where you could
+read its name.
+
+### Density: one node, three amounts of truth
+
+An agent node used to be a fixed 260×106 label with a two-line stream window. That is
+the right size for exactly one zoom level. At a zoom that fits twenty agents the body
+text is smaller than the dot grid behind it; at working zoom, two lines of a reply is
+less than the node has room to say.
+
+So the node has three densities and the zoom picks between two of them:
+
+| Zoom | Density | Shows |
+| --- | --- | --- |
+| < 50% | `glance` | Name, one live verb, elapsed, context hairline |
+| ≥ 50% | `summary` | …plus the last turn in the agent's own words, its tools, its cost |
+| double-click | `full` | …plus the transcript |
+
+`full` is never reached by zooming — there is no zoom at which every agent should open
+its transcript — so it only ever arrives as a deliberate act, and a node you opened
+stays open through any zoom. Agent nodes therefore declare no size at all: they pick
+their width from their density and their height from what they have to say, and React
+Flow measures the result. This means zooming costs no store write and cannot mark a
+canvas dirty.
+
+**The live verb is derived from tool calls, not from the reply** (`lib/liveverb.ts`),
+because tool calls are the only account of the work that arrives *while* the work is
+happening. `editing store.ts`, `running bun`, `searching`, `retry 3/10`. A failure and a
+question outrank any of them: an agent that asked you something an hour ago must not
+still be reporting the file it was reading at the time.
+
+**The summary is the agent's own sentence**, flattened from its last reply and shown
+verbatim. No second model paraphrases it, so there is nothing there to be wrong about.
+
+### The layout is the plan
+
+The canvas has always read left to right — supports in on the left, the agent,
+what it produced on the right. What it could not say was *how* a squad ran. Two
+agents side by side in a column look identical whether they started together or
+one waited for the other, and that difference is the whole content of a shape.
+
+So when a plan is in flight, its shape ranks the agents it produced:
+
+| The plan runs its steps | The agents are laid out |
+| --- | --- |
+| at once (`parallel`) | in one column beside the orchestrator |
+| in order (`chain`, `orchestrator-worker`, `evaluator-optimizer`) | chained left to right, each a rank past the one it waited for |
+
+The rule is **how the plan actually runs**, not what it was labelled. A shape
+the app demoted — a four-step "parallel" that is really running in order, which
+raises `plan.warning` — lays out as the sequence it is. The geometry must agree
+with what is happening, or it is a promise the runtime is not keeping.
+
+Mechanically this is a handful of extra edges handed to dagre before it ranks
+(`sequenceEdges`), so the ordering, the crossing-minimisation and the centring
+are still dagre's job rather than hand-rolled arithmetic. The spawn edges stay
+too — the orchestrator really did create all of them — and dagre resolves both
+constraints together.
+
+### Landing: what actually changed
+
+A green edge says a file was touched. It does not say whether that was a typo
+or a rewrite, and deciding whether to keep a run's work means knowing which.
+
+The baseline is **git HEAD** — both the only "before" that exists, since an
+agent edits in place and the tool call arrives after the fact, and the one a
+user already reasons about. Each row counts lines added and removed against it;
+a file git has never seen is not an error but a diff against nothing, and every
+line in it is new.
+
+Counts are refused rather than guessed when they cannot be trusted: a file too
+large to read whole would report everything past the cut as deleted, and a
+binary file has no lines at all. Both say so in place of a number.
+
+**There is deliberately no revert-everything button.** With HEAD as the
+baseline, "revert the run" means discarding every uncommitted change in the
+repository, including whatever you were doing before the agents started. That
+belongs to git, with git's own confirmations. Reverting *is* offered where it
+can be offered precisely: click a row and the diff view reverts a hunk at a
+time.
+
+### Keys
+
+| Key | Does |
+| --- | --- |
+| `⌘K` | Spawn, act, or jump to any node by name |
+| `S` `F` `D` `K` `E` | New agent · folder · file · skill · terminal, under the cursor |
+| `P` `U` `L` | Toggle the Pulse, Usage and persona panels |
+| `⌥1` `⌥2` `⌥3` | Pin the selection — or every agent — to glance, summary, or full |
+| `⇧⏎` | Step back to the whole canvas |
+| `⇧⌘L` / `T` | Tidy |
+| `⌘B` / `⌘\` | Toggle the rail drawer |
+
+`⌥`-digit is read off the physical key, not off what was typed: `⌥1` on a Mac
+keyboard produces `¡`. And it is a held chord rather than a bare digit because
+it overrides the zoom, and an override you trip by accident is one you then
+have to find and undo.
+
+### Pulse: what the canvas is doing
+
+A node says what *it* is doing. Nothing said what the canvas was doing — which agent
+asked a question two minutes ago, which one finished, who wrote that file. Answering
+that meant opening agents one at a time and reconstructing an order from nothing.
+
+Pulse is not a new log. The notification feed was already a timestamped, capped,
+newest-first record of turns, questions and failures attributed to a node — a Pulse of
+three kinds. It now admits the rest (`prompt`, `shape`, `spawned`, `wrote`), and **the
+bell is a filtered view of it** rather than the only view: the bell keeps meaning
+"something happened while you were looking elsewhere", so it never shows you a prompt
+you typed yourself.
+
+The module has two halves, computed from deliberately different things. The sentence at
+the top — *2 working · 1 needs you · 1 landed* — is the **present**, read off live
+session state. The feed below is the **past**, read off the log. A record of events
+cannot tell you whether the turn it recorded is still going, so it is not asked to.
 
 ### Working directories and files
 
@@ -343,8 +501,8 @@ library.
 
 Personalities defined on a canvas die with it, which makes a good "reviewer"
 un-reusable. The **library** is the palette: personas saved to
-`~/Library/Application Support/com.canvastrator.app/personalities.json`, edited in the right
-sidebar, available on every canvas.
+`~/Library/Application Support/com.canvastrator.app/personalities.json`, edited in a
+drawer off the left rail, available on every canvas.
 
 The library is deliberately available **without wiring**. Re-attaching "reviewer" on
 every new canvas would defeat the point of having a library. The canvas still ends up

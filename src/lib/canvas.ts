@@ -7,7 +7,7 @@ import {
   type CanvasMeta,
 } from './persist'
 import { personaFromNode } from './library'
-import { DEFAULT_ORCHESTRA } from './types'
+import { DEFAULT_ORCHESTRA, DEFAULT_PANELS } from './types'
 import { justWentQuiet, playDone } from './chime'
 import { useStore } from './store'
 
@@ -110,8 +110,44 @@ function rememberLast(id: string | null) {
 }
 
 /**
- * Reopen whatever was on screen last time. A canvas deleted since then just
- * leaves an empty surface, which is the same as a first run.
+ * The canvas to fall back on when the pointer can't say.
+ *
+ * The pointer lives in the webview's localStorage, which is not the same kind
+ * of durable as a file: it is per-origin, it is lost with the profile, and a
+ * webview that comes up without it is indistinguishable from a first run. That
+ * is the whole failure — no error, no missing file, just an app that opens on
+ * an empty "untitled" and mints a brand-new canvas as soon as anything lands
+ * on it, once per launch, while the real work sits on disk untouched.
+ *
+ * The files are the durable record, so they answer the question instead: the
+ * most recently saved canvas that has anything in it. An empty one is skipped
+ * because reopening it looks exactly like the bug — and a canvas that was
+ * deleted is not in the list at all, so a delete still sticks.
+ */
+async function openNewestOnDisk(): Promise<boolean> {
+  let list: CanvasMeta[]
+  try {
+    list = await listCanvases()
+  } catch {
+    // Nothing to fall back to. A genuine first run lands here too.
+    return false
+  }
+
+  const newest = list
+    .filter((c) => c.nodes > 0)
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0]
+  if (!newest) return false
+
+  const ok = await openCanvas(newest.id)
+  // A fallback that fails is not worth an error banner: the user did not ask
+  // for this canvas, and a blank surface is a fair first run.
+  if (!ok) useStore.setState({ canvasError: null })
+  return ok
+}
+
+/**
+ * Reopen whatever was on screen last time, falling back to the newest canvas
+ * on disk when nothing says which that was.
  */
 export async function restoreLastCanvas(): Promise<boolean> {
   try {
@@ -119,20 +155,21 @@ export async function restoreLastCanvas(): Promise<boolean> {
     try {
       last = localStorage.getItem(LAST_KEY)
     } catch {
-      return false
+      // No storage at all — the files still know what was saved.
+      return await openNewestOnDisk()
     }
-    if (!last) return false
+    if (!last) return await openNewestOnDisk()
 
     const ok = await openCanvas(last)
     if (ok) return true
 
     const why = useStore.getState().canvasError ?? ''
     if (why.includes(MISSING)) {
-      // Deleted since last time. Nothing to say — an empty surface is the
-      // same as a first run, and the pointer is dead weight.
+      // Deleted since last time. Nothing to say about it — but the rest of the
+      // user's canvases are still there, and one of them is where they were.
       rememberLast(null)
       useStore.setState({ canvasError: null })
-      return false
+      return await openNewestOnDisk()
     }
 
     // It exists and would not open. Keep pointing at it: the file is the
@@ -201,7 +238,8 @@ export async function saveCanvas(name?: string): Promise<boolean> {
       now.edges !== written.edges ||
       now.bus !== written.bus ||
       now.globalRules !== written.globalRules ||
-      now.plan !== written.plan,
+      now.plan !== written.plan ||
+      now.panels !== written.panels,
     canvasError: null,
   })
   return true
@@ -237,8 +275,19 @@ export async function openCanvas(id: string): Promise<boolean> {
     return false
   }
 
-  const restored = deserializeCanvas(doc.data)
-  rescuePersonas(doc.data)
+  // Reading the file is not the only thing that can fail: a canvas carrying a
+  // shape the deserializer doesn't survive would throw here, and a throw on
+  // the launch path is the silent version of this whole bug — the restore
+  // rejects, the app stays on a blank "untitled", and the next node minted
+  // becomes a new canvas. Fail like a canvas that would not open instead.
+  let restored: ReturnType<typeof deserializeCanvas>
+  try {
+    restored = deserializeCanvas(doc.data)
+    rescuePersonas(doc.data)
+  } catch (e) {
+    useStore.setState({ canvasError: `${doc.id} could not be read: ${e}` })
+    return false
+  }
   rememberLast(doc.id)
   detached = false
   epoch++
@@ -305,6 +354,7 @@ export function newCanvas() {
       globalRules: '',
       plan: null,
       orchestra: { ...DEFAULT_ORCHESTRA },
+      panels: { ...DEFAULT_PANELS },
     }),
   )
 }
@@ -462,7 +512,10 @@ export function watchCanvas(): () => void {
       // crash would mean reading the orchestrator's reasoning over again.
       s.plan !== seen.plan ||
       s.planning !== seen.planning ||
-      s.orchestra !== seen.orchestra
+      s.orchestra !== seen.orchestra ||
+      // Which readouts are showing is part of how this canvas is set up, so
+      // opening one is an edit — the same way placing the node used to be.
+      s.panels !== seen.panels
     seen = s
     if (!changed || loading) return
 

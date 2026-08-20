@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
-  Controls,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
@@ -10,21 +9,24 @@ import {
 } from '@xyflow/react'
 import { CanvasDialogs, CanvasMenuItems } from '@/components/CanvasBar'
 import { AppBar } from '@/components/AppBar'
-import { PanelDivider } from '@/components/PanelDivider'
-import { Sidebar } from '@/components/Sidebar'
+import { CommandPalette } from '@/components/CommandPalette'
+import { LeftRail } from '@/components/LeftRail'
+import { SpawnRing, type SpawnKind } from '@/components/SpawnRing'
+import { ZoomControls } from '@/components/ZoomControls'
 import { edgeTypes } from '@/components/edges'
 import { planFlow } from '@/lib/plannodes'
 import { FileViewer } from '@/components/FileViewer'
-import { RightDock } from '@/components/RightDock'
 import { CentralChat } from '@/components/CentralChat'
+import { PanelStack } from '@/components/panels/PanelStack'
 import { FileNode } from '@/components/nodes/FileNode'
 import { FolderNode } from '@/components/nodes/FolderNode'
 import { McpNode } from '@/components/nodes/McpNode'
 import { McpToolNode } from '@/components/nodes/McpToolNode'
 import { SessionNode } from '@/components/nodes/SessionNode'
 import { PlanStepNode } from '@/components/nodes/PlanStepNode'
+import { ShapeNode } from '@/components/nodes/ShapeNode'
 import { TerminalNode } from '@/components/nodes/TerminalNode'
-import { UsageNode } from '@/components/nodes/UsageNode'
+import { LandingNode } from '@/components/nodes/LandingNode'
 import { SkillNode } from '@/components/nodes/SkillNode'
 import {
   ContextMenu,
@@ -53,10 +55,8 @@ import {
   watchCompletion,
   watchLayout,
 } from '@/lib/canvas'
-import { CHAT_PANEL_ENABLED } from '@/lib/flags'
-import { togglePanels, usePanels } from '@/lib/panels'
 import { pipeTerminals } from '@/lib/terminals'
-import { SHORTCUT_LABEL, keyToCanvasAction, shouldIgnoreShortcut } from '@/lib/shortcuts'
+import { SHORTCUT_LABEL, keyToCanvasAction, keyToDensity, shouldIgnoreShortcut } from '@/lib/shortcuts'
 import { useStore, type GtNode } from '@/lib/store'
 import { PROVIDER_ACCENT, PROVIDER_LABEL, type Provider } from '@/lib/types'
 
@@ -68,12 +68,21 @@ const nodeTypes: NodeTypes = {
   mcp: McpNode,
   mcptool: McpToolNode,
   planstep: PlanStepNode,
-  usage: UsageNode,
+  shape: ShapeNode,
+  landing: LandingNode,
   terminal: TerminalNode,
 }
 
+/** The floating panels, as the right-click menu names them. */
+const PANEL_ITEMS = [
+  { key: 'pulse', label: 'Pulse' },
+  { key: 'usage', label: 'Usage' },
+  { key: 'personas', label: 'personas' },
+] as const
+
 function Surface() {
   const nodes = useStore((s) => s.nodes)
+  const panels = useStore((s) => s.panels)
   const edges = useStore((s) => s.edges)
   const plan = useStore((s) => s.plan)
   const providers = useStore((s) => s.providers)
@@ -99,7 +108,7 @@ function Surface() {
     addSkill,
     addFolder,
     addFile,
-    addUsage,
+    addLanding,
     addTerminal,
   } =
     useStore.getState()
@@ -118,7 +127,17 @@ function Surface() {
   }, [])
 
   const [menuAt, setMenuAt] = useState({ x: 0, y: 0 })
-  const { collapsed, widths } = usePanels()
+  /** Where the spawn ring is open, in screen coordinates, or null. */
+  const [ringAt, setRingAt] = useState<{ x: number; y: number } | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  /**
+   * Nodes pinned in place.
+   *
+   * Not persisted: it is a posture you take while reading a busy canvas, not a
+   * property of the canvas — and a lock that survived a restart would leave
+   * someone dragging a node that refuses to move for no visible reason.
+   */
+  const [locked, setLocked] = useState(false)
 
   const spawnAt = useCallback(
     (provider: Provider, screen: { x: number; y: number }) => {
@@ -223,6 +242,15 @@ function Surface() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // ⌘K first, and not gated on `shouldIgnoreShortcut`: a modified chord is
+      // not something you type into a field by accident, and reaching the
+      // palette from inside a composer is exactly when you want it.
+      if (e.key.toLowerCase() === 'k' && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
+        e.preventDefault()
+        setPaletteOpen((open) => !open)
+        return
+      }
+
       if (e.key.toLowerCase() === 'l' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
         e.preventDefault()
         useStore.getState().tidy()
@@ -232,8 +260,32 @@ function Surface() {
 
       if (shouldIgnoreShortcut(e.target)) return
       const st = useStore.getState()
-      // A dialog or the file editor owns the keyboard while it is up.
-      if (st.canvasDialog || st.openFilePath) return
+
+      // ⌥1/2/3 pins a density. To the selection where there is one, and to
+      // every agent otherwise — "show me all of these the same way" is the
+      // whole reason to reach for it.
+      const forced = keyToDensity(e)
+      if (forced) {
+        e.preventDefault()
+        const picked = st.nodes.filter((n) => n.selected && n.type === 'session')
+        const targets = picked.length
+          ? picked
+          : st.nodes.filter((n) => n.type === 'session')
+        for (const n of targets) st.setDensity(n.id, forced)
+        return
+      }
+
+      // ⇧⏎ steps back to the whole canvas, which at that zoom is every agent
+      // at glance density — one line each.
+      if (e.key === 'Enter' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault()
+        void fitView({ duration: 400, padding: 0.15 })
+        return
+      }
+
+      // A dialog, the file editor or the palette owns the keyboard while it
+      // is up — a bare `s` typed into the palette must not also spawn an agent.
+      if (st.canvasDialog || st.openFilePath || paletteOpen) return
       const action = keyToCanvasAction(e)
       if (!action) return
       e.preventDefault()
@@ -260,6 +312,16 @@ function Surface() {
         case 'skill':
           st.addSkill(at())
           break
+        case 'terminal':
+          st.addTerminal(at())
+          break
+        // The panels are screen furniture, not nodes: the key that puts one on
+        // screen takes it away again.
+        case 'pulse':
+        case 'usage':
+        case 'personas':
+          st.togglePanel(action)
+          break
         case 'tidy':
           st.tidy(true)
           break
@@ -273,29 +335,71 @@ function Surface() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dropScreen, fitView, screenToFlowPosition, spawnAt])
+  }, [dropScreen, fitView, paletteOpen, screenToFlowPosition, spawnAt])
 
 
-  const tidyAndFit = useCallback(() => {
-    useStore.getState().tidy()
-    // Layout is pointless if the result is off-screen.
-    setTimeout(() => fitView({ duration: 400, padding: 0.15 }), 60)
-  }, [fitView])
+  /**
+   * What each slot of the spawn ring does.
+   *
+   * Every one of them drops its node exactly where the ring opened, which is
+   * the promise the ring makes by opening there. Folder and File ask the OS
+   * for a path first and land when that returns — the position is captured
+   * before the dialog, so a node still arrives where you clicked even though
+   * the click was several seconds ago.
+   */
+  const spawnFromRing = useCallback(
+    (kind: SpawnKind, screen: { x: number; y: number }) => {
+      const st = useStore.getState()
+      const at = screenToFlowPosition(screen)
+      switch (kind) {
+        case 'agent': {
+          const provider = st.providers.find((p) => p.available)?.provider
+          if (provider) spawnAt(provider, screen)
+          break
+        }
+        case 'folder':
+          void pickPath(true).then((picked) => picked && st.addFolder(picked, at))
+          break
+        case 'file':
+          void pickPath(false).then((picked) => picked && st.addFile(picked, at))
+          break
+        case 'terminal':
+          st.addTerminal(at)
+          break
+        case 'skill':
+          st.addSkill(at)
+          break
+        case 'mcp':
+          // MCP servers have to be discovered before one can be chosen, and
+          // that is a list rather than a slot — the ring hands it to the menu
+          // that has room for it.
+          loadMcp()
+          setMenuAt(screen)
+          break
+        case 'landing':
+          st.addLanding(at)
+          break
+      }
+    },
+    [loadMcp, screenToFlowPosition, spawnAt],
+  )
+
+  /** The rail's module button, which has no cursor to land under. */
+  const addModule = useCallback(() => {
+    const id = useStore.getState().addLanding(screenToFlowPosition(dropScreen()))
+    setTimeout(() => fitView({ nodes: [{ id }], duration: 380, maxZoom: 1, padding: 0.5 }), 40)
+  }, [dropScreen, fitView, screenToFlowPosition])
 
   return (
     <div className="flex h-full w-full flex-col">
-      <AppBar collapsed={collapsed} onToggleSidebar={togglePanels} onTidy={tidyAndFit} />
+      <AppBar onOpenPalette={() => setPaletteOpen(true)} />
 
-      {/* Panels float: rounded, with the window's own translucency showing
-          through the gaps between them. */}
-      <div className="flex min-h-0 flex-1 gap-2 px-2 pb-2">
-        <Sidebar collapsed={collapsed} onToggle={togglePanels} width={widths.canvases} />
-        {!collapsed && <PanelDivider panel="canvases" />}
+      {/* One rail, and the canvas. The drawer the rail opens floats over the
+          canvas rather than taking a column from it — see `LeftRail`. */}
+      <div className="relative flex min-h-0 flex-1">
+        <LeftRail onAddLanding={addModule} />
 
-        <div
-          className="relative min-w-0 flex-1 overflow-hidden rounded-xl border border-line bg-canvas"
-          ref={wrapper}
-        >
+        <div className="relative min-w-0 flex-1 overflow-hidden bg-canvas" ref={wrapper}>
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <div
@@ -307,6 +411,14 @@ function Surface() {
               setMenuAt({ x: e.clientX, y: e.clientY })
               loadMcp()
             }}
+              onDoubleClick={(e) => {
+                // Only on empty canvas. A double-click on a node belongs to
+                // the node — it is how an agent opens to full density — and a
+                // ring opening on top of what you just opened would be two
+                // answers to one gesture.
+                if ((e.target as HTMLElement).closest('.react-flow__node')) return
+                setRingAt({ x: e.clientX, y: e.clientY })
+              }}
             >
               <ReactFlow
                 nodes={shownNodes}
@@ -322,21 +434,22 @@ function Surface() {
                   useStore.getState().claimNode(node.id)
                 }}
                 onNodeClick={(_, node) => {
-                  // A node is a label; everything about the agent is in the
-                  // dock. So clicking one opens the dock on that conversation
-                  // rather than leaving the click with nothing to show for it.
+                  // Clicking an agent points the chatbox at it. Reading the
+                  // conversation is a second gesture — double-click, which
+                  // opens the node itself to full density — so a single click
+                  // never rearranges anything.
                   if (node.type !== 'session') return
-                  const st = useStore.getState()
-                  st.setChatTarget(node.id)
-                  // With the dock's chat tab retired the chatbox is always on
-                  // screen, so pointing it at the node is the whole gesture.
-                  // setRightTab opens the dock, so with the panel back the
-                  // click still lands somewhere visible.
-                  if (CHAT_PANEL_ENABLED) st.setRightTab('chat')
+                  useStore.getState().setChatTarget(node.id)
                 }}
+                nodesDraggable={!locked}
                 proOptions={{ hideAttribution: true }}
                 minZoom={0.2}
                 maxZoom={1.6}
+                // Double-click belongs to the canvas, not to the viewport: on
+                // empty space it opens the spawn ring, and on a node it opens
+                // that node to full density. React Flow's own zoom-on-
+                // double-click would fire underneath both.
+                zoomOnDoubleClick={false}
                 defaultEdgeOptions={{ type: 'context' }}
                 deleteKeyCode={null}
               >
@@ -346,10 +459,7 @@ function Surface() {
                   size={1}
                   color="var(--color-line-soft)"
                 />
-                <Controls
-                  className="!bottom-4 !left-4 [&>button]:!border-line [&>button]:!bg-panel [&>button]:!fill-fg-muted [&>button:hover]:!bg-surface-2"
-                  showInteractive={false}
-                />
+                <ZoomControls locked={locked} onToggleLock={() => setLocked((v) => !v)} />
               </ReactFlow>
             </div>
           </ContextMenuTrigger>
@@ -418,11 +528,15 @@ function Surface() {
               Skill
               <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.skill}</span>
             </ContextMenuItem>
-            <ContextMenuItem onSelect={() => addUsage(screenToFlowPosition(menuAt))}>
-              Usage
+            <ContextMenuItem onSelect={() => addLanding(screenToFlowPosition(menuAt))}>
+              Landing
             </ContextMenuItem>
-            <ContextMenuItem onSelect={() => addTerminal(screenToFlowPosition(menuAt))}>
+            <ContextMenuItem
+              onSelect={() => addTerminal(screenToFlowPosition(menuAt))}
+              className="justify-between"
+            >
               Terminal
+              <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.terminal}</span>
             </ContextMenuItem>
             <ContextMenuSub>
               <ContextMenuSubTrigger>MCP</ContextMenuSubTrigger>
@@ -445,6 +559,19 @@ function Surface() {
               </ContextMenuSubContent>
             </ContextMenuSub>
             <ContextMenuSeparator />
+            {/* Not "new" anything: these show a readout about the canvas
+                rather than putting something on it. */}
+            {PANEL_ITEMS.map(({ key, label }) => (
+              <ContextMenuItem
+                key={key}
+                onSelect={() => useStore.getState().togglePanel(key)}
+                className="justify-between"
+              >
+                {panels[key].open ? `Hide ${label}` : `Show ${label}`}
+                <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL[key]}</span>
+              </ContextMenuItem>
+            ))}
+            <ContextMenuSeparator />
             <ContextMenuItem
               onSelect={() => useStore.getState().tidy(true)}
               className="justify-between"
@@ -457,7 +584,8 @@ function Surface() {
         </ContextMenu>
 
 
-        {!CHAT_PANEL_ENABLED && <CentralChat />}
+        <CentralChat />
+        <PanelStack />
 
         <FileViewer />
         <CanvasDialogs />
@@ -465,14 +593,22 @@ function Surface() {
         {nodes.length === 0 && (
           <div className="pointer-events-none absolute inset-0 grid place-items-center">
             <p className="font-mono text-[12px] text-fg-faint">
-              right-click → add a folder, then a session
+              double-click anywhere to put something here · ⌘K for everything else
             </p>
           </div>
         )}
         </div>
-
-        <RightDock />
       </div>
+
+      {ringAt && (
+        <SpawnRing
+          at={ringAt}
+          provider={providers.find((p) => p.available)?.provider ?? null}
+          onPick={(kind) => spawnFromRing(kind, ringAt)}
+          onClose={() => setRingAt(null)}
+        />
+      )}
+      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
     </div>
   )
 }
