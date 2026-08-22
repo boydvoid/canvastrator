@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { looksLikeQuestion } from './asking'
+import { lastSaid, looksLikeQuestion, questionTail } from './asking'
 
 describe('looksLikeQuestion', () => {
   it('catches a plain question at the end', () => {
@@ -29,5 +29,39 @@ describe('looksLikeQuestion', () => {
 
   it('reads through a trailing blank line', () => {
     expect(looksLikeQuestion('Which folder should I use?\n\n')).toBe(true)
+  })
+})
+
+describe('lastSaid', () => {
+  it('takes the last assistant turn that actually said something', () => {
+    expect(
+      lastSaid([
+        { role: 'assistant', text: 'first' },
+        { role: 'user', text: 'go on' },
+        { role: 'assistant', text: 'second' },
+        { role: 'assistant', text: '   ' },
+      ]),
+    ).toBe('second')
+  })
+
+  it('is empty when nothing has been said', () => {
+    expect(lastSaid([{ role: 'user', text: 'hello' }])).toBe('')
+    expect(lastSaid([])).toBe('')
+  })
+})
+
+describe('questionTail', () => {
+  it('takes the last line, which is where the ask is', () => {
+    expect(questionTail('I read the module.\nIt has two paths.\nShould I drop one?')).toBe(
+      'Should I drop one?',
+    )
+  })
+
+  it('strips the markdown that would read as a typo in one line', () => {
+    expect(questionTail('- **Drop** the `fallback`?')).toBe('Drop the fallback?')
+  })
+
+  it('is empty for an empty turn', () => {
+    expect(questionTail('   \n  ')).toBe('')
   })
 })

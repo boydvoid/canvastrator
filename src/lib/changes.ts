@@ -13,7 +13,7 @@
 import { fileDiffBase, readFileHead } from './bridge'
 import { computeHunks } from './hunks'
 
-export type Landed = {
+export type Change = {
   path: string
   /** Lines added and removed against HEAD. */
   added: number
@@ -41,8 +41,8 @@ export async function diffStat(
   path: string,
   read = readFileHead,
   base = fileDiffBase,
-): Promise<Landed> {
-  const empty = (reason: string, untracked = false): Landed => ({
+): Promise<Change> {
+  const empty = (reason: string, untracked = false): Change => ({
     path,
     added: 0,
     removed: 0,
@@ -77,8 +77,31 @@ export async function diffStat(
 }
 
 /** Formats a stat for a row you scan rather than read. */
-export function statLabel(l: Landed): string {
+export function statLabel(l: Change): string {
   if (l.reason && !l.untracked) return l.reason
   if (l.added === 0 && l.removed === 0) return 'no change'
   return `+${l.added} −${l.removed}`
+}
+
+/**
+ * A path you can tell apart from the one under it.
+ *
+ * Absolute paths are the file's identity — two agents in two worktrees write
+ * files with the same name — but they are useless to read: on a canvas rooted
+ * in a repo, every row starts with the same forty characters of home
+ * directory, and the part that differs is the part that gets truncated away.
+ *
+ * So the root comes off where there is one, and where there is not, enough of
+ * the tail is kept to be recognisable. The full path stays in the title, which
+ * is where you go when the short one is ambiguous.
+ */
+export function shortPath(path: string, root?: string): string {
+  if (root && path.startsWith(root)) {
+    const rest = path.slice(root.length).replace(/^\//, '')
+    if (rest) return rest
+  }
+  const parts = path.split('/').filter(Boolean)
+  // Three segments is the most a 288px row can hold and still show the
+  // filename whole, which is the segment that matters.
+  return parts.length <= 3 ? path.replace(/^\//, '') : parts.slice(-3).join('/')
 }

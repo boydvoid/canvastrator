@@ -75,3 +75,23 @@ pub fn file_diff_base(path: String) -> DiffBase {
         },
     }
 }
+
+/// Where the work would land: the current branch of the repo a path sits in.
+///
+/// Named the same way the panel reads it — the branch is the "to" of a change,
+/// and the Changes panel says it beside the file list so a run that edited the
+/// wrong worktree is visible before the diff is read rather than after.
+///
+/// `None` for a detached HEAD or a directory git knows nothing about: a
+/// missing branch is a fact to draw, not an error to raise.
+#[tauri::command]
+pub fn git_branch(path: String) -> Option<String> {
+    let dir = Path::new(&path);
+    let dir = if dir.is_file() { dir.parent()? } else { dir };
+    let name = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let name = name.trim();
+    if name.is_empty() || name == "HEAD" {
+        return None;
+    }
+    Some(name.to_string())
+}

@@ -167,3 +167,37 @@ export function spendByAgent(sessions: SessionLike[]): Share[] {
     }))
     .sort((a, b) => b.costUsd - a.costUsd)
 }
+
+/**
+ * How long until a window resets, in the coarsest unit that is still useful.
+ *
+ * A reset is a deadline you plan around rather than watch tick: minutes matter
+ * in the last hour, hours matter for the rest of a session window, and a
+ * weekly window is answered in days. Null for a window that has never been
+ * touched — it has no reset because nothing has started it.
+ */
+export function untilReset(resetsAt: string | null, now = Date.now()): string | null {
+  if (!resetsAt) return null
+  const at = Date.parse(resetsAt)
+  if (Number.isNaN(at)) return null
+  const ms = at - now
+  // A window whose reset has passed is a window the next turn will refresh;
+  // saying "now" beats a negative countdown or a stale figure.
+  if (ms <= 0) return 'now'
+  const mins = Math.floor(ms / 60_000)
+  if (mins < 60) return `${mins}m`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return mins % 60 === 0 ? `${hours}h` : `${hours}h ${mins % 60}m`
+  const days = Math.floor(hours / 24)
+  return hours % 24 === 0 ? `${days}d` : `${days}d ${hours % 24}h`
+}
+
+/**
+ * How alarmed to be about a plan window, on the same ladder as a context one.
+ *
+ * Deliberately the same thresholds as `band`: two meters in one panel that
+ * turn amber at different places would teach nothing about either.
+ */
+export function planBand(percent: number): ContextBand {
+  return band(percent / 100)
+}

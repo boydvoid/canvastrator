@@ -1,8 +1,8 @@
-import { memo } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
-import { FolderOpen, Trash2, TriangleAlert } from 'lucide-react'
+import { FolderOpen, GitBranch, Trash2, TriangleAlert } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { pickPath } from '@/lib/bridge'
+import { gitBranch, pickPath } from '@/lib/bridge'
 import { basename, useStore, type GtNode } from '@/lib/store'
 import type { FolderNodeData } from '@/lib/types'
 import { cn } from '@/lib/utils'
@@ -22,6 +22,46 @@ function FolderNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'fol
   const attachCount = useStore(
     (s) => s.edges.filter((e) => e.source === id && e.type === 'attach').length,
   )
+
+  // Read rather than stored: a branch changes under the app — the agent
+  // commits, the user switches — and a remembered one would be a label that
+  // used to be true. Nothing here has to be persisted for the same reason.
+  const [branch, setBranch] = useState<string | null>(null)
+  useEffect(() => {
+    let live = true
+    if (d.missing) return setBranch(null)
+    void gitBranch(d.path)
+      .then((b) => live && setBranch(b))
+      .catch(() => live && setBranch(null))
+    return () => {
+      live = false
+    }
+  }, [d.path, d.missing])
+
+  const wt = d.worktree
+  const [name, setName] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const nameRef = useRef<HTMLInputElement>(null)
+  const createWorktree = useStore((s) => s.createWorktree)
+  const removeWorktree = useStore((s) => s.removeWorktree)
+
+  useEffect(() => {
+    if (d.draft) nameRef.current?.focus()
+  }, [d.draft])
+
+  const cut = async () => {
+    setBusy(true)
+    setError(null)
+    const out = await createWorktree(id, name)
+    setBusy(false)
+    if (out) setError(out.error)
+  }
+
+  const drop = async () => {
+    const out = await removeWorktree(id)
+    if (out) setError(out.error)
+  }
 
   const rechoose = async () => {
     const picked = await pickPath(true)
@@ -55,6 +95,43 @@ function FolderNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'fol
         title="Drag onto a session — the first folder is its working directory, the rest are extra roots"
       />
 
+      {d.draft ? (
+        <div className="flex flex-col gap-1.5 px-2.5 py-2">
+          <span className="flex items-center gap-2">
+            <GitBranch size={13} className="shrink-0 text-fg-muted" />
+            <span className="font-mono text-[10px] tracking-[0.11em] text-fg-faint">WORKTREE</span>
+            <Button variant="ghost" size="icon" className="ml-auto" onClick={() => void drop()} title="Discard">
+              <Trash2 size={12} />
+            </Button>
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="shrink-0 font-mono text-[11px] text-fg-faint">wt/</span>
+            <input
+              ref={nameRef}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation()
+                if (e.key === 'Enter' && !busy) void cut()
+                // A name nobody typed is a node nobody wanted.
+                if (e.key === 'Escape' && !name) void drop()
+              }}
+              placeholder="branch name"
+              spellCheck={false}
+              disabled={busy}
+              className="min-w-0 flex-1 rounded border border-line bg-canvas px-1.5 py-0.5 font-mono text-[11px] text-fg outline-none placeholder:text-fg-faint focus:border-line-strong"
+            />
+          </span>
+          <span className="truncate font-mono text-[9.5px] text-fg-faint" title={wt?.repo}>
+            {busy ? 'cutting the checkout…' : `from ${basename(wt?.repo ?? '')} · ⏎ to create`}
+          </span>
+          {error && (
+            <span className="font-mono text-[9.5px] leading-snug text-[var(--color-danger)]">
+              {error}
+            </span>
+          )}
+        </div>
+      ) : (
       <div className="flex items-center gap-2 px-2.5 py-2">
         {d.missing ? (
           <TriangleAlert size={13} className="shrink-0 text-[var(--color-danger)]" />
@@ -71,10 +148,47 @@ function FolderNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'fol
             {d.missing ? 'folder not found' : d.path.replace(/^\/Users\/[^/]+/, '~')}
           </div>
         </button>
-        <Button variant="ghost" size="icon" onClick={() => removeNode(id)} title="Remove">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => (wt ? void drop() : removeNode(id))}
+          title={
+            wt
+              ? 'Delete this checkout. Refused while it holds uncommitted work.'
+              : 'Remove from the canvas'
+          }
+        >
           <Trash2 size={12} />
         </Button>
       </div>
+      )}
+
+      {!d.draft && (branch || wt) && (
+        <div className="flex items-center gap-1.5 border-t border-line-soft px-2.5 py-1">
+          <GitBranch size={10} className="shrink-0 text-fg-faint" />
+          {/* An agent's own checkout is worth calling out: it is the difference
+              between a diff you can attribute and one you cannot. */}
+          <span
+            className={cn(
+              'min-w-0 truncate font-mono text-[10px]',
+              wt || branch?.startsWith('wt/') ? 'text-[var(--color-live)]' : 'text-fg-muted',
+            )}
+            title={wt ? `Cut from ${wt.repo}` : 'The main checkout'}
+          >
+            {branch ?? wt?.branch}
+          </span>
+          {wt && (
+            <span className="ml-auto shrink-0 truncate font-mono text-[9px] text-fg-faint">
+              from {basename(wt.repo)}
+            </span>
+          )}
+          {error && !d.draft && (
+            <span className="ml-auto shrink-0 truncate font-mono text-[9px] text-[var(--color-danger)]" title={error}>
+              {error.replace(/^Error:\s*/, '').split('\n')[0]}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="border-t border-line-soft px-2.5 py-1 font-mono text-[10px] text-fg-faint">
         {cwdCount === 0 && attachCount === 0

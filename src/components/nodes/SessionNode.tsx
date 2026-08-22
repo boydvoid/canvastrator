@@ -1,6 +1,13 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Handle, NodeToolbar, Position, useViewport, type NodeProps } from '@xyflow/react'
-import { ChevronRight, ChevronsUpDown, CircleAlert, Hexagon, Minimize2 } from 'lucide-react'
+import {
+  ChevronRight,
+  ChevronsUpDown,
+  CircleAlert,
+  Hexagon,
+  Minimize2,
+  Sparkles,
+} from 'lucide-react'
 import { AgentMessage } from '@/components/AgentMessage'
 import { SessionInspector } from '@/components/Inspector'
 import { cycleDensity, densityOf, DENSITY_SIZE, type Density } from '@/lib/density'
@@ -101,6 +108,25 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
   const d = data as SessionNodeData
   const { zoom } = useViewport()
   const density = densityOf(d.density, zoom)
+  // Skills wired into this agent from a node on the canvas, and the count of
+  // everything its CLI reported carrying on its own.
+  //
+  // Selected as one string, not an array: a selector that builds an array
+  // returns a new identity on every store change, which is an infinite render
+  // loop rather than a performance note. Same bargain as `folderRootsFor`.
+  const attachedNames = useStore((s) =>
+    s.edges
+      .filter((e) => e.target === id && e.type === 'attach')
+      .map((e) => s.nodes.find((n) => n.id === e.source))
+      .filter((n): n is GtNode & { type: 'skill' } => n?.type === 'skill')
+      .map((n) => n.data.name)
+      .join('\n'),
+  )
+  const attached = useMemo(
+    () => (attachedNames ? attachedNames.split('\n') : []),
+    [attachedNames],
+  )
+  const carried = (d.skills?.length ?? 0) + (d.commands?.length ?? 0)
   const setDensity = useStore((s) => s.setDensity)
   const setChatTarget = useStore((s) => s.setChatTarget)
 
@@ -112,7 +138,9 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
   // Steps this agent proposed that are still waiting on the user. A plan is
   // the loudest thing on a canvas — nothing is running because of it.
   const awaitingApproval = useStore((s) =>
-    s.plan?.fromNodeId === id ? s.plan.steps.filter((st) => st.state === 'pending').length : 0,
+    s.plans
+      .filter((p) => p.fromNodeId === id)
+      .reduce((n, p) => n + p.steps.filter((st) => st.state === 'pending').length, 0),
   )
 
   // Folders come from the graph, not from node state — the wiring is the
@@ -352,6 +380,38 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
         </div>
       )}
 
+      {/* ── What it can do, when there is room to say ────────────────── */}
+      {density !== 'glance' && (attached.length > 0 || carried > 0) && (
+        <div className="flex min-w-0 items-center gap-1.5 border-t border-line-soft px-3 py-1.5">
+          <Sparkles size={10} className="shrink-0 text-fg-faint" />
+          {/* Wired skills first and named: they are this canvas's doing, and
+              the only ones anybody here can change. What the CLI brought is a
+              count — twenty names would be the whole node. */}
+          {attached.slice(0, 2).map((name) => (
+            <span
+              key={name}
+              className="min-w-0 shrink truncate rounded bg-surface-2 px-1.5 py-px font-mono text-[9px] text-fg-muted"
+              title={`${name} — wired in from a skill node`}
+            >
+              {name}
+            </span>
+          ))}
+          {attached.length > 2 && (
+            <span className="shrink-0 font-mono text-[9px] text-fg-faint">
+              +{attached.length - 2}
+            </span>
+          )}
+          {carried > 0 && (
+            <span
+              className="ml-auto shrink-0 font-mono text-[9px] text-fg-faint"
+              title="Skills and commands this agent's CLI loaded by itself"
+            >
+              {carried} from its CLI
+            </span>
+          )}
+        </div>
+      )}
+
       {/* ── What it has cost, and the way back down the ladder ───────── */}
       {density !== 'glance' && (
         <div className="flex min-w-0 items-center gap-2.5 border-t border-line-soft bg-canvas/40 px-3 py-1.5 font-mono text-[9.5px] text-fg-subtle">
@@ -363,6 +423,35 @@ function SessionNodeInner({ id, data, selected }: NodeProps<GtNode & { type: 'se
           </span>
           <span className="shrink-0 tabular-nums">{fmtUsd(d.usage.costUsd)}</span>
           <span className="shrink-0">{d.permission}</span>
+          {/* The project's own verdict on this agent's work. Colour carries it
+              — a red node in a squad of six is the one to open. */}
+          {d.check && (
+            <span
+              className={cn(
+                'shrink-0',
+                d.check.state === 'pass' && 'text-[var(--color-live)]',
+                d.check.state === 'fail' && 'text-[var(--color-danger)]',
+                d.check.state === 'running' && 'gt-caret',
+              )}
+              title={
+                d.check.error
+                  ? `The check could not run: ${d.check.error}`
+                  : d.check.state === 'running'
+                    ? 'Running the project check…'
+                    : `${d.check.state === 'pass' ? 'Passed' : 'Failed'}${
+                        d.check.ms ? ` in ${(d.check.ms / 1000).toFixed(1)}s` : ''
+                      }${d.check.tail ? `\n\n${d.check.tail}` : ''}`
+              }
+            >
+              {d.check.state === 'running'
+                ? 'checking…'
+                : d.check.state === 'pass'
+                  ? 'checks pass'
+                  : d.check.error
+                    ? 'check failed to run'
+                    : 'checks fail'}
+            </span>
+          )}
           <button
             className="ml-auto shrink-0 rounded p-0.5 text-fg-faint hover:bg-surface-2 hover:text-fg"
             title={

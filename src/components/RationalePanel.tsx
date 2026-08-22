@@ -78,6 +78,10 @@ function Entry({ d }: { d: Decision }) {
 /**
  * Why the canvas looks the way it does.
  *
+ * Named for the reasoning rather than for the decisions: the Decisions panel
+ * is the question an agent is holding the run on, and two surfaces called the
+ * same thing meant clicking the wrong one to answer it.
+ *
  * The canvas shows what happened; this shows what was decided, in order: what
  * was asked, the shape it chose and the reason it gave, every step it
  * proposed, the roles it invented, and every time the app pushed back. When an
@@ -88,9 +92,9 @@ function Entry({ d }: { d: Decision }) {
  * It follows the orchestrator rather than the selected agent. A worker's
  * conversation is the work; the decisions are made here.
  */
-export function DecisionContent() {
+export function RationaleContent() {
   const nodes = useStore((s) => s.nodes)
-  const plan = useStore((s) => s.plan)
+  const plans = useStore((s) => s.plans)
   const target = useStore((s) => s.chatTarget)
   const setChatTarget = useStore((s) => s.setChatTarget)
 
@@ -109,7 +113,12 @@ export function DecisionContent() {
     )
   }
 
-  const entries = decisionsFor(orchestrator.data.messages, plan)
+  // Every plan this agent has on the go: the panel is its whole decision
+  // path, and two jobs running at once are both part of it.
+  const entries = decisionsFor(
+    orchestrator.data.messages,
+    plans.filter((p) => p.fromNodeId === orchestrator.id).flatMap((p) => p.steps),
+  )
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2">

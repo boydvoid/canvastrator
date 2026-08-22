@@ -16,6 +16,10 @@ vi.mock('./bridge', () => ({
     saved.order.push(`save:${doc.id}`)
   }),
   loadCanvasDoc: vi.fn(),
+  // Clearing takes each node out through `removeNode`, which tears down what
+  // the node owned outside the store.
+  clearSessionImages: vi.fn(async () => {}),
+  terminalClose: vi.fn(async () => {}),
   listCanvases: vi.fn(async () => []),
   deleteCanvasDoc: vi.fn(async (id: string) => {
     saved.order.push(`delete:${id}`)
@@ -32,6 +36,7 @@ const {
   beginLaunchRestore,
   restoreLastCanvas,
   newCanvas,
+  clearCanvas,
 } = await import('./canvas')
 const { deleteCanvasDoc, listCanvases, loadCanvasDoc } = await import('./bridge')
 const { useStore } = await import('./store')
@@ -83,8 +88,9 @@ describe('autosave', () => {
   })
 
   /**
-   * The bug this pins: "Clear canvas" used to empty the graph while keeping
-   * canvasId, so autosave immediately overwrote the only copy on disk.
+   * The bug this pins: a canvas emptied by accident — a select-all delete, a
+   * load that came back with nothing — would autosave over the only copy on
+   * disk before the user could undo it. An explicit save still goes through.
    */
   it('refuses to overwrite a saved canvas with an empty one', async () => {
     useStore.setState({ nodes: [node('a')] as never })
@@ -98,6 +104,86 @@ describe('autosave', () => {
     expect(saved.docs).toHaveLength(1)
     expect(saved.docs[0].data.nodes).toHaveLength(1)
     stop()
+  })
+})
+
+describe('clearCanvas', () => {
+  const session = (id: string) =>
+    ({ id, type: 'session' as const, position: { x: 0, y: 0 }, data: {} }) as never
+
+  /**
+   * The bug: "Clear canvas" called `newCanvas`, so it started a different
+   * canvas instead of emptying this one — the file kept its old contents and
+   * anything holding the id was left on a canvas that was no longer on screen.
+   */
+  it('empties the canvas in place, keeping folders and the canvas it is on', () => {
+    useStore.setState({
+      nodes: [node('f1'), session('s1'), node('f2')] as never,
+      edges: [
+        { id: 'e1', source: 'f1', target: 's1' },
+        { id: 'e2', source: 's1', target: 'f2' },
+        { id: 'e3', source: 'f1', target: 'f2' },
+      ] as never,
+      bus: [{ id: 'm1' }] as never,
+      delivered: { s1: new Set(['m1']) } as never,
+      autoPlaced: new Set(['f1', 's1']),
+      canvasId: 'canvas_here',
+      canvasName: 'mine',
+      canvasSavedAt: 42,
+    })
+
+    clearCanvas()
+
+    const s = useStore.getState()
+    expect(s.nodes.map((n) => n.id)).toEqual(['f1', 'f2'])
+    // Folders stay exactly where the user put them.
+    expect(s.nodes[0].position).toEqual({ x: 0, y: 0 })
+    // Only the edge between two survivors is left.
+    expect(s.edges.map((e) => e.id)).toEqual(['e3'])
+    expect(s.bus).toEqual([])
+    expect(s.delivered).toEqual({})
+    expect([...s.autoPlaced]).toEqual(['f1'])
+
+    // Still the same canvas, in the same place in the list.
+    expect(s.canvasId).toBe('canvas_here')
+    expect(s.canvasName).toBe('mine')
+    expect(s.canvasSavedAt).toBe(42)
+  })
+
+  it('saves the emptied canvas back over the file it came from', async () => {
+    useStore.setState({ nodes: [node('f1'), session('s1')] as never })
+    await saveCanvas('keeper')
+    const id = useStore.getState().canvasId
+    saved.docs.length = 0
+
+    const stop = watchCanvas()
+    clearCanvas()
+    await vi.waitFor(() => expect(saved.docs).toHaveLength(1), { timeout: 3000 })
+    stop()
+
+    expect(saved.docs[0].id).toBe(id)
+    expect(saved.docs[0].data.nodes).toHaveLength(1)
+  })
+
+  /**
+   * A canvas with no folders clears to nothing at all, which is the one shape
+   * autosave refuses to write. Without an explicit save the file keeps its
+   * pre-clear contents and the canvas comes back full on the next launch — so
+   * the write has to happen here, to the same file, not be left to the watcher.
+   */
+  it('writes an empty graph back to the same file when there are no folders', async () => {
+    useStore.setState({ nodes: [session('s1'), session('s2')] as never })
+    await saveCanvas('keeper')
+    const id = useStore.getState().canvasId
+    saved.docs.length = 0
+
+    clearCanvas()
+    await vi.waitFor(() => expect(saved.docs).toHaveLength(1), { timeout: 3000 })
+
+    expect(useStore.getState().nodes).toHaveLength(0)
+    expect(saved.docs[0].id).toBe(id)
+    expect(saved.docs[0].data.nodes).toEqual([])
+    expect(useStore.getState().canvasId).toBe(id)
   })
 })
 
@@ -293,11 +379,11 @@ describe('reopening without duplicating', () => {
     // everything the files do. Without this the app opened on a blank
     // "untitled" and minted a whole new canvas for it, once per launch.
     vi.mocked(listCanvases).mockResolvedValueOnce([
-      { id: 'canvas_old', name: 'older', updatedAt: 10, version: 1, nodes: 4 },
-      { id: 'canvas_recent', name: 'mine', updatedAt: 99, version: 1, nodes: 3 },
+      { id: 'canvas_old', name: 'older', updatedAt: 10, createdAt: 1, version: 1, nodes: 4 },
+      { id: 'canvas_recent', name: 'mine', updatedAt: 99, createdAt: 2, version: 1, nodes: 3 },
       // Empty, and newer than either: reopening one of these looks exactly
       // like the bug, so it is skipped.
-      { id: 'canvas_blank', name: 'untitled', updatedAt: 500, version: 1, nodes: 0 },
+      { id: 'canvas_blank', name: 'untitled', updatedAt: 500, createdAt: 3, version: 1, nodes: 0 },
     ])
     vi.mocked(loadCanvasDoc).mockResolvedValue({
       id: 'canvas_recent',

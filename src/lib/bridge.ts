@@ -27,7 +27,27 @@ export const sendTurn = (req: {
   mcpServers: McpServer[]
   /** Absolute paths; how images reach a CLI, which takes no image bytes. */
   images: string[]
+  /** Operations this canvas refuses to let the agent take unasked. */
+  guards: string[]
 }) => invoke<string>('send_turn', { req })
+
+/** One operation the canvas knows how to hold back. */
+export type GuardRule = { id: string; what: string }
+
+/** Every guard the app can enforce, for the settings list. */
+export const guardRules = () => invoke<GuardRule[]>('guard_rules')
+
+/** Let one agent past one guard, from its next attempt on. */
+export const guardAllow = (sessionId: string, rule: string) =>
+  invoke<void>('guard_allow', { sessionId, rule })
+
+/** Take that approval back. */
+export const guardRevoke = (sessionId: string, rule: string) =>
+  invoke<void>('guard_revoke', { sessionId, rule })
+
+/** What this agent has been allowed so far. */
+export const guardAllowed = (sessionId: string) =>
+  invoke<string[]>('guard_allowed', { sessionId })
 
 export const interruptSession = (sessionId: string) =>
   invoke<void>('interrupt_session', { sessionId })
@@ -98,6 +118,64 @@ export type DiffBase = { original: string | null; reason: string | null; rel: st
 /** The committed version of a file, to diff the working copy against. */
 export const fileDiffBase = (path: string) => invoke<DiffBase>('file_diff_base', { path })
 
+/** One metered window of a Claude plan, as `plan_usage` flattens it. */
+export type UsageWindow = { kind: string; label: string; percent: number; resetsAt: string | null }
+
+export type PlanUsage = {
+  available: boolean
+  subscription: string | null
+  windows: UsageWindow[]
+  reason: string | null
+}
+
+/**
+ * What the user's Claude plan has left.
+ *
+ * Costs no tokens — it is the same control request that backs the CLI's own
+ * `/usage` view — but it does spawn a process, so callers poll it on a timer
+ * rather than on every render.
+ */
+export const planUsage = () => invoke<PlanUsage>('plan_usage')
+
+/** What the project's own check said about an agent's work. */
+export type CheckResult = {
+  ok: boolean
+  code: number | null
+  ms: number
+  tail: string
+  /** Set when the check could not run at all, as opposed to failing. */
+  error: string | null
+}
+
+/** Run a canvas's check command in a directory and report the verdict. */
+export const runCheck = (cwd: string, command: string) =>
+  invoke<CheckResult>('run_check', { cwd, command })
+
+/** What this project's check probably is — a guess, for the user to accept. */
+export const detectCheck = (cwd: string) => invoke<string | null>('detect_check', { cwd })
+
+/** One checkout of a repository — the main one, or an agent's own. */
+export type Worktree = { path: string; branch: string; repo: string; created: boolean }
+
+/** The repository root a path sits in, or null outside one. */
+export const gitRepoRoot = (path: string) => invoke<string | null>('git_repo_root', { path })
+
+/**
+ * Give an agent its own checkout. Idempotent: isolating twice lands back on
+ * the existing one rather than making a second.
+ */
+export const worktreeAdd = (path: string, name: string) =>
+  invoke<Worktree>('worktree_add', { path, name })
+
+/** Every checkout of the repository a path belongs to. */
+export const worktreeList = (path: string) => invoke<Worktree[]>('worktree_list', { path })
+
+/** Remove a checkout. Refuses while it holds uncommitted work — never forced. */
+export const worktreeRemove = (path: string) => invoke<void>('worktree_remove', { path })
+
+/** The branch a path sits on, or null for a detached HEAD or no repo at all. */
+export const gitBranch = (path: string) => invoke<string | null>('git_branch', { path })
+
 export const dirExists = (path: string) => invoke<boolean>('dir_exists', { path })
 
 export const listCanvases = () => invoke<CanvasMeta[]>('list_canvases')
@@ -105,6 +183,10 @@ export const listCanvases = () => invoke<CanvasMeta[]>('list_canvases')
 export const loadCanvasDoc = (id: string) => invoke<CanvasDoc>('load_canvas', { id })
 
 export const saveCanvasDoc = (doc: CanvasDoc) => invoke<void>('save_canvas', { doc })
+
+/** Write a handover note beside the canvases, and return where it landed. */
+export const writeNote = (name: string, text: string) =>
+  invoke<string>('write_note', { name, text })
 
 export const deleteCanvasDoc = (id: string) => invoke<void>('delete_canvas', { id })
 

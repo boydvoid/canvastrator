@@ -62,12 +62,28 @@ import type { Plan } from './types'
 export type Box = { x: number; y: number; w: number; h: number }
 export type Placement = Record<string, { x: number; y: number }>
 
+/**
+ * The gaps, as a ladder.
+ *
+ * White space is what says which things belong together, and it can only say
+ * that if the gutter *inside* a group is visibly smaller than the gutter
+ * around it. The old numbers were 18px between two file chips and 56px between
+ * an agent and its files, against nodes 31px tall — three steps of the grammar
+ * inside one visual band. Nothing read as a group, so everything read as one
+ * clump, and at glance zoom the smallest gutters closed to a hairline.
+ *
+ * So each rung is comfortably larger than the one it contains: chips in a
+ * stack, a server and its tools, an agent and its branches, one strip and the
+ * next, one generation and the next. Bigger overall, and the point is not the
+ * size — it is that the steps between the rungs are now legible.
+ */
+
 /** A session to the supports on its left, and to the files on its right. */
-const BRANCH_GAP_X = 56
+const BRANCH_GAP_X = 96
 /** Between two stacked supports, and between two rows of files. */
-const STACK_GAP_Y = 18
+const STACK_GAP_Y = 26
 /** Between two files side by side in the grid beside an agent. */
-const STACK_GAP_X = 18
+const STACK_GAP_X = 26
 /** Widest a file grid may get. Past this it pushes the next rank too far
  *  right to read as the same flow. */
 const MAX_FILE_COLUMNS = 3
@@ -80,11 +96,20 @@ const MAX_FILE_COLUMNS = 3
  *  under `rankdir: 'LR'` is the axis this layout was chosen to spend. */
 const MAX_SUPPORT_ROWS = 3
 /** A parent's strip to the column of children beside it — a readable level. */
-const LEVEL_GAP_X = 150
+const LEVEL_GAP_X = 210
 /** Between sibling subtrees in a column. */
-const SIBLING_GAP_Y = 52
-/** Between an MCP server and the column of tool nodes it feeds. */
-const SATELLITE_GAP_X = 28
+const SIBLING_GAP_Y = 110
+/** Between an MCP server and the grid of tool nodes it feeds. */
+const SATELLITE_GAP_X = 44
+/**
+ * Tallest a server's tool grid may get before it takes another column.
+ *
+ * Eleven tools in one column is 800px of canvas hanging off one server — it
+ * sets the height of everything near it, and every other group ends up read
+ * against that. Same trade as `MAX_SUPPORT_ROWS`, for the same reason: under
+ * `rankdir: 'LR'` width is the axis this layout has to spend.
+ */
+const MAX_SATELLITE_ROWS = 4
 
 /**
  * The box the layout assumes an agent needs.
@@ -101,8 +126,8 @@ export const FILE_SIZE = { w: 196, h: 38 }
 /** A terminal is a label with a line of its last output under it. */
 export const TERMINAL_SIZE = { w: 240, h: 64 }
 
-/** The Landing list. A row per file written, so it grows with the run. */
-export const LANDING_SIZE = { w: 330, h: 260 }
+/** The Changes list. A row per file written, so it grows with the run. */
+export const CHANGES_SIZE = { w: 330, h: 260 }
 
 /** Fallback sizes for nodes React Flow hasn't measured yet. */
 const DEFAULT_SIZE: Record<GtNode['type'], { w: number; h: number }> = {
@@ -112,7 +137,7 @@ const DEFAULT_SIZE: Record<GtNode['type'], { w: number; h: number }> = {
   skill: { w: 240, h: 190 },
   mcp: { w: 240, h: 150 },
   mcptool: { w: 208, h: 52 },
-  landing: LANDING_SIZE,
+  changes: CHANGES_SIZE,
   terminal: TERMINAL_SIZE,
 }
 
@@ -249,18 +274,69 @@ function group(nodes: GtNode[], edges: Edge[]): Groups {
   }
 }
 
+/**
+ * The tool nodes a server feeds, wrapped into columns that grow away from it.
+ *
+ * Column-major, so reading order runs down the column nearest the server
+ * first — the same rule the support grid follows, and for the same reason.
+ */
+function satelliteGrid(kids: GtNode[]) {
+  const boxes = kids.map(sizeOf)
+  const cols = Math.max(1, Math.ceil(boxes.length / MAX_SATELLITE_ROWS))
+  const rows = Math.max(1, Math.ceil(boxes.length / cols))
+  const cellOf = (i: number) => ({ col: Math.floor(i / rows), row: i % rows })
+  const rowH = Array.from({ length: rows }, (_, r) =>
+    Math.max(0, ...boxes.filter((_, i) => cellOf(i).row === r).map((b) => b.h)),
+  )
+  const colW = Array.from({ length: cols }, (_, c) =>
+    Math.max(0, ...boxes.filter((_, i) => cellOf(i).col === c).map((b) => b.w)),
+  )
+  return {
+    boxes,
+    cellOf,
+    rowH,
+    colW,
+    w: boxes.length ? stackHeight(colW, STACK_GAP_X) : 0,
+    h: boxes.length ? stackHeight(rowH, STACK_GAP_Y) : 0,
+  }
+}
+
+/**
+ * Place a server's tools in the lane between it and the agent they serve,
+ * centred on the server's own middle line.
+ */
+function placeSatellites(
+  kids: GtNode[],
+  laneLeft: number,
+  centre: number,
+  put: (id: string, at: { x: number; y: number }) => void,
+) {
+  if (!kids.length) return
+  const grid = satelliteGrid(kids)
+  const top = centre - grid.h / 2
+  const rowTop = grid.rowH.map((_, r) =>
+    grid.rowH.slice(0, r).reduce((sum, h) => sum + h + STACK_GAP_Y, top),
+  )
+  const colLeft = grid.colW.map((_, c) =>
+    grid.colW.slice(0, c).reduce((x, w) => x + w + STACK_GAP_X, laneLeft),
+  )
+  kids.forEach((kid, i) => {
+    const { col, row } = grid.cellOf(i)
+    put(kid.id, {
+      x: Math.round(colLeft[col]),
+      y: Math.round(rowTop[row] + (grid.rowH[row] - grid.boxes[i].h) / 2),
+    })
+  })
+}
+
 /** How much room a support and the tool nodes it feeds need, together. */
 function supportSize(s: Support) {
   const own = sizeOf(s.node)
   if (!s.kids.length) return { w: own.w, h: own.h }
-  const kidsW = Math.max(...s.kids.map((k) => sizeOf(k).w))
-  const kidsH = stackHeight(
-    s.kids.map((k) => sizeOf(k).h),
-    STACK_GAP_Y,
-  )
+  const kids = satelliteGrid(s.kids)
   // The tools sit in the lane between the server and the agent, so the cluster
   // is as wide as both and as tall as the taller of them.
-  return { w: own.w + SATELLITE_GAP_X + kidsW, h: Math.max(own.h, kidsH) }
+  return { w: own.w + SATELLITE_GAP_X + kids.w, h: Math.max(own.h, kids.h) }
 }
 
 /**
@@ -345,10 +421,10 @@ export function layoutCanvas(
    */
   movable?: ReadonlySet<string>,
   /**
-   * The plan in flight, when there is one. Its shape decides whether the
-   * agents it produced read as a column or as a chain — see `sequenceEdges`.
+   * The plans in flight, if any. Each one's shape decides whether the agents
+   * it produced read as a column or as a chain — see `sequenceEdges`.
    */
-  plan?: Plan | null,
+  plans?: Plan[],
 ): Placement {
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const { outputs, supports, shared, children, orphans } = group(nodes, edges)
@@ -434,9 +510,14 @@ export function layoutCanvas(
   // into a column that says nothing about the order it ran in. The spawn edges
   // above stay — the orchestrator really did create all of them — and dagre
   // resolves the two constraints together.
-  const chain = sequenceEdges(plan, byId)
-  for (let i = 1; i < chain.length; i++) {
-    if (g.hasNode(chain[i - 1]) && g.hasNode(chain[i])) g.setEdge(chain[i - 1], chain[i])
+  // Per plan: two plans running at once produced two chains, and threading
+  // the last agent of one into the first of the other would draw an order
+  // nothing ran in.
+  for (const plan of plans ?? []) {
+    const chain = sequenceEdges(plan, byId)
+    for (let i = 1; i < chain.length; i++) {
+      if (g.hasNode(chain[i - 1]) && g.hasNode(chain[i])) g.setEdge(chain[i - 1], chain[i])
+    }
   }
 
   // Dagre breaks cycles itself, so a spawn loop can't hang the layout.
@@ -457,8 +538,39 @@ export function layoutCanvas(
     // centre *is* the rank key.
     ranks.set(laid.x, [...(ranks.get(laid.x) ?? []), s.id])
   }
+  // A support feeding several agents goes in front of them, in a lane of its
+  // own — and the lane has to be *reserved* before the ranks are packed. It
+  // used to be worked out afterwards, as `leftmost thing I feed, minus one
+  // level gap`, which is a space nothing had set aside: a 240px server and its
+  // tool grid were dropped into a 150px gutter already occupied by the rank
+  // before it, and landed square on top of an agent. Everything downstream of
+  // that read as a pile.
+  const rankKeys = [...ranks.keys()].sort((a, b) => a - b)
+  const rankOf = new Map<string, number>()
+  rankKeys.forEach((key, i) => {
+    for (const id of ranks.get(key)!) rankOf.set(id, i)
+  })
+
+  /** Which lane a shared support belongs in: in front of the first rank it feeds. */
+  const laneOf = new Map<string, number>()
+  /** How wide that lane has to be: the widest cluster wanting to sit in it. */
+  const laneW = new Map<number, number>()
+  for (const sup of shared) {
+    const ranked = sup.targets.map((t) => rankOf.get(t)).filter((r): r is number => r != null)
+    const lane = ranked.length ? Math.min(...ranked) : 0
+    laneOf.set(sup.node.id, lane)
+    laneW.set(lane, Math.max(laneW.get(lane) ?? 0, supportSize(sup).w))
+  }
+
+  /** Where each reserved lane starts, once the packing has walked past it. */
+  const laneX = new Map<number, number>()
   let cursor = 0
-  for (const key of [...ranks.keys()].sort((a, b) => a - b)) {
+  rankKeys.forEach((key, i) => {
+    const wide = laneW.get(i) ?? 0
+    if (wide) {
+      laneX.set(i, cursor)
+      cursor += wide + LEVEL_GAP_X
+    }
     const ids = ranks.get(key)!
     const mine = ids.map((id) => blocks.get(id)!)
     cursor += Math.max(...mine.map((b) => b.leftPad))
@@ -467,7 +579,7 @@ export function layoutCanvas(
       Math.max(...mine.map((b) => b.own.w)) +
       Math.max(...mine.map((b) => b.rightPad)) +
       LEVEL_GAP_X
-  }
+  })
 
   // ── anchored to whatever the user already placed ──────────────────────
   //
@@ -542,15 +654,9 @@ export function layoutCanvas(
       }
       // A server's tools go in the lane between it and the agent — still left
       // to right, rather than doubling back under the node.
-      const kidsH = stackHeight(
-        sup.kids.map((k) => sizeOf(k).h),
-        STACK_GAP_Y,
-      )
-      let ky = Math.round(centre - kidsH / 2)
-      for (const kid of sup.kids) {
-        if (owns(kid.id)) out[kid.id] = { x: Math.round(left + nodeSize.w + SATELLITE_GAP_X), y: ky }
-        ky += sizeOf(kid).h + STACK_GAP_Y
-      }
+      placeSatellites(sup.kids, left + nodeSize.w + SATELLITE_GAP_X, centre, (id, at) => {
+        if (owns(id)) out[id] = at
+      })
     })
 
     // Outputs in a grid off the session's right, read left to right, so the
@@ -578,13 +684,23 @@ export function layoutCanvas(
     return { ...(out[id] ?? node.position), ...sizeOf(node) }
   }
 
-  const takenByShared: Box[] = []
+  // Measured against everything already placed, not just against each other:
+  // a lane is reserved horizontally, but the agents beside it decide what is
+  // free vertically, and a server that lands on one is the whole point of the
+  // lane defeated.
+  const takenByShared: Box[] = Object.keys(out)
+    .map((id) => placedBox(id))
+    .filter((b): b is Box => !!b)
   for (const sup of shared) {
     const fed = sup.targets.map(placedBox).filter((b): b is Box => !!b)
     if (!fed.length) continue
     const box = supportSize(sup)
     const nodeSize = sizeOf(sup.node)
-    const left = Math.min(...fed.map((b) => b.x)) - LEVEL_GAP_X - nodeSize.w
+    const lane = laneOf.get(sup.node.id)
+    const left =
+      lane != null && laneX.has(lane)
+        ? laneX.get(lane)! + dx
+        : Math.min(...fed.map((b) => b.x)) - LEVEL_GAP_X - nodeSize.w
     // Level with the middle of everything it feeds, so its edges fan evenly.
     const centre = fed.reduce((sum, b) => sum + b.y + b.h / 2, 0) / fed.length
     const spot = findFreeSpot(
@@ -593,15 +709,14 @@ export function layoutCanvas(
     )
     takenByShared.push({ ...spot, w: box.w, h: box.h })
     if (owns(sup.node.id)) out[sup.node.id] = spot
-    const kidsH = stackHeight(
-      sup.kids.map((k) => sizeOf(k).h),
-      STACK_GAP_Y,
+    placeSatellites(
+      sup.kids,
+      spot.x + nodeSize.w + SATELLITE_GAP_X,
+      spot.y + box.h / 2,
+      (id, at) => {
+        if (owns(id)) out[id] = at
+      },
     )
-    let ky = Math.round(spot.y + box.h / 2 - kidsH / 2)
-    for (const kid of sup.kids) {
-      if (owns(kid.id)) out[kid.id] = { x: spot.x + nodeSize.w + SATELLITE_GAP_X, y: ky }
-      ky += sizeOf(kid).h + STACK_GAP_Y
-    }
   }
 
   const deepest = Object.entries(out).reduce((low, [id, p]) => {

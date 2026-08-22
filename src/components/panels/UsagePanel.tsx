@@ -1,5 +1,8 @@
-import { Gauge } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { CircleDot, Gauge } from 'lucide-react'
 import { FloatingPanel } from '@/components/panels/FloatingPanel'
+import { planUsage, type PlanUsage } from '@/lib/bridge'
+import { shouldOffer } from '@/lib/compact'
 import { runSince } from '@/lib/pulse'
 import { useStore, type GtNode } from '@/lib/store'
 import {
@@ -9,7 +12,9 @@ import {
   contextUse,
   fmtTokens,
   fmtUsd,
+  planBand,
   spendByAgent,
+  untilReset,
   type SessionLike,
 } from '@/lib/usage'
 import { PROVIDER_ACCENT } from '@/lib/types'
@@ -21,13 +26,87 @@ const BAND_COLOR = {
   hot: 'var(--color-danger)',
 } as const
 
+/**
+ * What the plan has left, refreshed while the panel is open.
+ *
+ * Polled rather than pushed: the figure comes from a separate short-lived
+ * process, so it cannot ride along on a turn. A minute is slow enough that the
+ * process cost is nothing and fast enough that a window filling up during a
+ * long squad run is visible before it stops the run.
+ *
+ * Nothing is fetched while the panel is closed. The panel is always mounted —
+ * it is the header that disappears, not the component — so being closed has to
+ * be asked for rather than assumed. It matters more than a saved subprocess:
+ * the read shells out to the CLI, and a spawn on launch is a spawn nobody
+ * asked for, which macOS asks the user about.
+ */
+function usePlan(open: boolean): PlanUsage | null {
+  const [plan, setPlan] = useState<PlanUsage | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    let live = true
+    const read = () =>
+      planUsage()
+        .then((p) => live && setPlan(p))
+        // A CLI that cannot answer leaves the panel on money, which is what it
+        // showed before any of this existed.
+        .catch(() => live && setPlan(null))
+    void read()
+    const t = setInterval(read, 60_000)
+    return () => {
+      live = false
+      clearInterval(t)
+    }
+  }, [open])
+
+  return plan
+}
+
+const BAND_TEXT = {
+  calm: 'text-fg-subtle',
+  warm: 'text-[var(--color-claude)]',
+  hot: 'text-[var(--color-danger)]',
+} as const
+
+/**
+ * One plan window: how much of it is gone, and when it comes back.
+ *
+ * The reset is half the answer. "83% of your session window" reads as an
+ * emergency on its own and as a shrug when the window turns over in nine
+ * minutes, and only one of those should stop you starting a squad.
+ */
+function WindowRow({ w }: { w: PlanUsage['windows'][number] }) {
+  const tone = planBand(w.percent)
+  const resets = untilReset(w.resetsAt)
+  return (
+    <li className="flex items-center gap-[9px]">
+      <span className="w-[82px] shrink-0 truncate font-mono text-[10px] text-fg-muted">
+        {w.label}
+      </span>
+      <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2">
+        <span
+          className="block h-full rounded-full transition-[width] duration-500"
+          style={{ width: `${Math.max(2, Math.min(100, w.percent))}%`, background: BAND_COLOR[tone] }}
+        />
+      </span>
+      <span className={cn('w-7 shrink-0 text-right font-mono text-[10px] tabular-nums', BAND_TEXT[tone])}>
+        {Math.round(w.percent)}%
+      </span>
+      <span className="w-[52px] shrink-0 text-right font-mono text-[9px] text-fg-faint tabular-nums">
+        {resets ? `${resets}` : '—'}
+      </span>
+    </li>
+  )
+}
+
 /** One headline figure. Three of them across the top, in one row. */
 function Figure({ value, label, strong }: { value: string; label: string; strong?: boolean }) {
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
       <span
         className={cn(
-          'truncate font-slab text-[19px] leading-none font-medium tabular-nums',
+          'truncate font-slab text-[21px] leading-none font-medium tabular-nums',
           strong ? 'text-fg-strong' : 'text-fg-muted',
         )}
       >
@@ -42,13 +121,23 @@ function Figure({ value, label, strong }: { value: string; label: string; strong
 function ContextRow({ s }: { s: SessionLike }) {
   const use = contextUse(s)
   const tone = band(use?.fraction ?? null)
+  const compact = useStore((st) => st.compact)
+  const [busy, setBusy] = useState(false)
+  const offer = shouldOffer(use?.fraction)
+
+  const run = async () => {
+    setBusy(true)
+    await compact(s.id)
+    setBusy(false)
+  }
+
   return (
-    <li className="flex items-center gap-2">
+    <li className="flex items-center gap-[9px]">
       <span
         className="h-1.5 w-1.5 shrink-0 rounded-full"
         style={{ background: PROVIDER_ACCENT[s.provider] }}
       />
-      <span className="w-[84px] shrink-0 truncate font-mono text-[10px] text-fg-muted" title={s.name}>
+      <span className="w-[82px] shrink-0 truncate font-mono text-[10px] text-fg-muted" title={s.name}>
         {s.name}
       </span>
       {/* An unknown window gets the space but no bar. A rail with nothing in
@@ -61,9 +150,22 @@ function ContextRow({ s }: { s: SessionLike }) {
           />
         )}
       </span>
+      {/* The offer sits on the meter that raised it: a full window is the only
+          moment this is the obvious next move, and a button parked somewhere
+          else is one you find after the run has already failed. */}
+      {offer && (
+        <button
+          onClick={() => void run()}
+          disabled={busy}
+          title="Have this agent write a handover note, then continue in a fresh window carrying only that note"
+          className="shrink-0 rounded px-1.5 py-px font-mono text-[9px] text-[var(--color-attn)] hover:bg-surface-2 disabled:text-fg-faint"
+        >
+          {busy ? 'compacting…' : 'compact'}
+        </button>
+      )}
       <span
         className={cn(
-          'w-8 shrink-0 text-right font-mono text-[10px] tabular-nums',
+          'w-7 shrink-0 text-right font-mono text-[10px] tabular-nums',
           tone === 'hot' ? 'text-[var(--color-danger)]' : 'text-fg-subtle',
         )}
         title={
@@ -111,6 +213,17 @@ export function UsagePanel() {
   const total = canvasUsage(sessions)
   const rate = since ? burnRate(total.costUsd, Date.now() - since) : null
   const shares = spendByAgent(sessions).filter((s) => s.costUsd > 0)
+  // Minimized still counts as open: the header badge is the plan window, and
+  // it is the reason to leave the panel folded in the corner at all.
+  const open = useStore((s) => s.panels.usage.open)
+  const plan = usePlan(open)
+  // The two headline windows, which is what the CLI's own view leads with. A
+  // scoped or unreleased bucket at 0% is noise at the top of a panel; it is
+  // still drawn in the list below.
+  const headline = (plan?.windows ?? []).filter((w) => w.kind !== 'weekly_scoped').slice(0, 2)
+  // Codex reports no cost at all — not zero, none — so a canvas with one on it
+  // has a total that is knowingly short. Saying so beats a confident figure.
+  const silent = sessions.some((s) => s.provider === 'codex')
 
   return (
     <FloatingPanel
@@ -118,29 +231,81 @@ export function UsagePanel() {
       title="USAGE"
       Icon={Gauge}
       badge={
-        // The total belongs in the header: it is the figure you keep an eye
-        // on, and a minimized Usage should still carry it.
-        <span className="font-mono text-[9.5px] text-fg-subtle tabular-nums">
-          {fmtUsd(total.costUsd)} this canvas
-        </span>
+        // On a plan, the figure you keep an eye on is the window, not the
+        // money — and a minimized Usage should still carry the one that can
+        // stop a run. Money is the right badge only where money is charged.
+        plan?.available && headline[0] ? (
+          <span
+            className={cn(
+              'font-mono text-[9.5px] tabular-nums',
+              BAND_TEXT[planBand(headline[0].percent)],
+            )}
+            title={`${headline[0].label} window${
+              plan.subscription ? ` on your ${plan.subscription} plan` : ''
+            }`}
+          >
+            {Math.round(headline[0].percent)}% {headline[0].label}
+          </span>
+        ) : (
+          <span className="font-mono text-[9.5px] text-fg-subtle tabular-nums">
+            {fmtUsd(total.costUsd)} this canvas
+          </span>
+        )
       }
     >
-      {sessions.length === 0 ? (
-        <p className="px-3 py-4 text-[11px] leading-snug text-fg-faint">
-          No agents yet. Spawn one and its spend and context window appear here.
-        </p>
-      ) : (
-        <>
-          <div className="flex gap-3 px-3 pt-3 pb-2.5">
+      {/* The headline is what you glance at: on a plan, the two windows that
+          can stop the run; on API-key auth, the money, because there the money
+          is real. Agents is in both — it is what the other two are spread
+          over. */}
+      <div className="flex gap-3.5 px-3.5 pt-3.5 pb-3">
+        {plan?.available && headline.length > 0 ? (
+          headline.map((w) => (
+            <Figure
+              key={w.kind}
+              value={`${Math.round(w.percent)}%`}
+              label={untilReset(w.resetsAt) ? `${w.label} · ${untilReset(w.resetsAt)}` : w.label}
+              strong={w.kind === headline[0].kind}
+            />
+          ))
+        ) : (
+          <>
             <Figure value={fmtUsd(total.costUsd)} label="spent" strong />
             <Figure
               value={rate != null ? fmtUsd(rate) : '—'}
               label={rate != null ? 'per 10 min' : 'rate — too early'}
             />
-            <Figure value={String(total.sessions)} label={total.sessions === 1 ? 'agent' : 'agents'} />
-          </div>
+          </>
+        )}
+        <Figure value={String(total.sessions)} label={total.sessions === 1 ? 'agent' : 'agents'} />
+      </div>
 
-          <div className="flex flex-col gap-2 border-t border-line px-3 py-2.5">
+      {/* About the account rather than this canvas, which is why it survives an
+          empty one: whether there is room to start a squad is a question you
+          ask before there are any agents to ask it about. */}
+      {plan?.available && plan.windows.length > 0 && (
+        <div className="flex flex-col gap-[9px] border-t border-line px-3.5 pt-3 pb-3.5">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[9px] tracking-[0.11em] text-fg-faint">PLAN LIMITS</span>
+            <span className="ml-auto font-mono text-[9px] text-fg-faint">
+              {plan.subscription ? `${plan.subscription} · claude` : 'claude'}
+            </span>
+          </div>
+          <ul className="space-y-[9px]">
+            {plan.windows.map((w) => (
+              <WindowRow key={w.kind + w.label} w={w} />
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {sessions.length === 0 ? (
+        <p className="border-t border-line px-3.5 py-4 text-[11px] leading-snug text-fg-faint">
+          No agents on this canvas yet. Spawn one and its context window
+          {plan?.available ? ' and share of the run' : ' and spend'} appear here.
+        </p>
+      ) : (
+        <>
+          <div className="flex flex-col gap-[9px] border-t border-line px-3.5 pt-3 pb-3.5">
             <div className="flex items-center gap-2">
               <span className="font-mono text-[9px] tracking-[0.11em] text-fg-faint">
                 CONTEXT WINDOW
@@ -149,7 +314,7 @@ export function UsagePanel() {
                 the one that ends a run
               </span>
             </div>
-            <ul className="max-h-32 space-y-1.5 overflow-y-auto overscroll-contain">
+            <ul className="max-h-32 space-y-[9px] overflow-y-auto overscroll-contain">
               {sessions.map((s) => (
                 <ContextRow key={s.id} s={s} />
               ))}
@@ -157,11 +322,14 @@ export function UsagePanel() {
           </div>
 
           {shares.length > 0 && (
-            <div className="flex flex-col gap-2 border-t border-line px-3 py-2.5">
+            <div className="flex flex-col gap-2.5 border-t border-line px-3.5 pt-3 pb-3.5">
+              {/* "Spend" is only true where money changes hands. On a plan
+                  the same bar answers a different question — which agent used
+                  the run up — so it is named for that instead. */}
               <span className="font-mono text-[9px] tracking-[0.11em] text-fg-faint">
-                SPEND BY AGENT
+                {plan?.subscription ? 'SHARE OF THE RUN' : 'SPEND BY AGENT'}
               </span>
-              <div className="flex h-2 gap-0.5 overflow-hidden rounded-sm">
+              <div className="flex h-2.5 gap-0.5 overflow-hidden rounded-sm">
                 {shares.map((s) => (
                   <span
                     key={s.id}
@@ -179,8 +347,17 @@ export function UsagePanel() {
               <div className="flex gap-3">
                 {shares.slice(0, 4).map((s) => (
                   <div key={s.id} className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="font-mono text-[10.5px] text-fg tabular-nums">
-                      {fmtUsd(s.costUsd)}
+                    {/* The swatch sits with the figure rather than above the
+                        name: it is what ties this column to its slice of the
+                        bar, and the bar is directly above it. */}
+                    <span className="flex items-center gap-1.5">
+                      <span
+                        className="h-[5px] w-[5px] shrink-0 rounded-full"
+                        style={{ background: PROVIDER_ACCENT[s.provider] }}
+                      />
+                      <span className="font-mono text-[10.5px] text-fg tabular-nums">
+                        {fmtUsd(s.costUsd)}
+                      </span>
                     </span>
                     <span className="truncate font-mono text-[8px] text-fg-faint">{s.name}</span>
                   </div>
@@ -189,12 +366,33 @@ export function UsagePanel() {
             </div>
           )}
 
-          <div className="flex items-center gap-2 border-t border-line bg-canvas/40 px-3 py-1.5 font-mono text-[9.5px] text-fg-faint tabular-nums">
-            <span title="Tokens billed as fresh input across every agent">
-              in {fmtTokens(total.inputTokens)}
-            </span>
-            <span title="Tokens generated across every agent">
-              out {fmtTokens(total.outputTokens)}
+          <div className="flex items-center gap-2 border-t border-line bg-panel px-3.5 py-2 font-mono text-[9.5px] text-fg-faint tabular-nums">
+            <CircleDot
+              size={11}
+              className="shrink-0"
+              style={{ color: rate != null ? 'var(--color-live)' : 'var(--color-fg-faint)' }}
+            />
+            {/* What the money means depends on how you pay. On a plan these
+                turns are already covered by the monthly fee, so the figure is
+                what they would have cost at API rates — a way to compare
+                agents against each other, not a bill. Saying "spent" there
+                would be the panel's one outright lie. */}
+            <span
+              className="truncate"
+              title={
+                (plan?.subscription
+                  ? `Your ${plan.subscription} plan covers these turns. This is what the tokens would cost at API rates, for comparison only.`
+                  : 'Billed per token on this login.') +
+                `\nin ${fmtTokens(total.inputTokens)} · out ${fmtTokens(total.outputTokens)}` +
+                (silent ? '\ncodex reports no cost, so it is missing from this figure.' : '')
+              }
+            >
+              {plan?.subscription
+                ? `≈ ${fmtUsd(total.costUsd)} at API rates`
+                : rate != null
+                  ? `≈ ${fmtUsd(rate * 6)}/hr at this pace`
+                  : 'rate — too early to say'}
+              {silent && ', codex not counted'}
             </span>
             {/* The agent nearest its ceiling is the one that will fail first,
                 and the reason to look at this panel before starting something
@@ -202,7 +400,7 @@ export function UsagePanel() {
             {total.tightest?.use.fraction != null && (
               <span
                 className={cn(
-                  'ml-auto truncate',
+                  'ml-auto shrink-0 truncate',
                   band(total.tightest.use.fraction) === 'hot' && 'text-[var(--color-danger)]',
                 )}
                 title="The fullest context window on this canvas"

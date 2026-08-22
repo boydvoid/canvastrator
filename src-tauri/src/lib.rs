@@ -1,6 +1,8 @@
 mod canvas;
+mod check;
 mod diff;
 mod env;
+mod guard;
 mod event;
 mod images;
 mod library;
@@ -10,6 +12,8 @@ mod providers;
 mod session;
 mod skills;
 mod terminal;
+mod usage;
+mod worktree;
 
 use std::sync::Arc;
 
@@ -290,6 +294,7 @@ pub fn run() {
             canvas::list_canvases,
             canvas::load_canvas,
             canvas::save_canvas,
+            canvas::write_note,
             canvas::delete_canvas,
             library::load_library,
             library::save_library,
@@ -298,6 +303,18 @@ pub fn run() {
             skills::discover_skills,
             skills::list_project_files,
             diff::file_diff_base,
+            diff::git_branch,
+            guard::guard_rules,
+            guard::guard_allow,
+            guard::guard_revoke,
+            guard::guard_allowed,
+            check::run_check,
+            check::detect_check,
+            usage::plan_usage,
+            worktree::git_repo_root,
+            worktree::worktree_add,
+            worktree::worktree_list,
+            worktree::worktree_remove,
             mcp::discover_mcp_servers,
             terminal::terminal_open,
             terminal::terminal_write,

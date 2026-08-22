@@ -7,6 +7,7 @@ import {
   removeSessionImage,
   writeSessionImage,
 } from '@/lib/bridge'
+import { useStore } from '@/lib/store'
 import type { DiscoveredSkill, Provider } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
@@ -117,12 +118,33 @@ export function Composer({
   const [active, setActive] = useState(0)
   const [dismissed, setDismissed] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
+  const seed = useStore((s) => s.composerSeed)
+  const clearSeed = useStore((s) => s.clearComposerSeed)
   const skillsRef = useRef<DiscoveredSkill[] | null>(null)
 
   const token = dismissed ? null : activeToken(draft, caret)
 
   // Reopen the menu as soon as a new token starts.
   useEffect(() => setDismissed(false), [token?.trigger, token?.start])
+
+  /**
+   * Text handed over by another surface — the Skills panel naming a skill.
+   *
+   * Appended rather than assigned: you may already be halfway through a
+   * sentence when you reach for one, and replacing what you typed to insert a
+   * skill name would be a worse trade than an odd-looking line you can edit.
+   * Focus follows, because the next thing to happen is typing.
+   */
+  useEffect(() => {
+    if (!seed) return
+    setDraft((d) => (d ? `${d.trimEnd()} ${seed}` : seed))
+    clearSeed()
+    const el = ref.current
+    if (el) {
+      el.focus()
+      requestAnimationFrame(() => el.setSelectionRange(el.value.length, el.value.length))
+    }
+  }, [seed, clearSeed])
 
   useEffect(() => {
     let live = true

@@ -28,6 +28,11 @@
      lives in the [data-theme='light'] block below. */
 
   /* Surfaces, from furthest back to nearest front. */
+  /* The desk the panels sit on. Behind everything, including the canvas, so
+     the inset edges read as panels lifted off a surface rather than as boxes
+     drawn on one — and so the gap between two canvases sliding past each other
+     is a real space rather than a seam. */
+  --color-ground: oklch(0.125 0.007 265);
   --color-canvas: oklch(0.165 0.008 265);
   --color-panel: oklch(0.215 0.009 265);
   --color-surface: oklch(0.25 0.010 265);
@@ -72,6 +77,16 @@
   --color-live: oklch(0.80 0.17 145);
   --color-danger: oklch(0.65 0.20 25);
 
+  /* Two more states, for the readouts that describe the canvas rather than a
+     node. `work` is something still running and `attn` is something stopped
+     waiting on you — neither belongs to a provider, because several providers
+     may be in either state at once and picking one accent would name a winner.
+     `attn-dim` is the only surface either of them gets: the ground under the
+     banner that says an agent is blocked on an answer. */
+  --color-work: oklch(0.68 0.14 255);
+  --color-attn: oklch(0.80 0.15 85);
+  --color-attn-dim: oklch(0.26 0.032 85);
+
   /* One accent per orchestration shape, for the badge that opens a reply.
      Derived, not chosen: every one of these is an existing accent or a mix of
      two, so re-pointing the palette re-points these with it and the light
@@ -99,6 +114,7 @@
    `src/lib/theme.test.ts` parses this block and fails the build if any of
    them drops below 4.5:1. */
 html[data-theme='light'] {
+  --color-ground: oklch(0.915 0.005 265);
   --color-canvas: oklch(0.965 0.004 265);
   --color-panel: oklch(0.985 0.003 265);
   --color-surface: oklch(1 0 0);
@@ -136,6 +152,11 @@ html[data-theme='light'] {
   /* Darker than the other accents on purpose: danger is the one colour drawn
      as text on a tint of itself, and a 20% wash eats contrast. */
   --color-danger: oklch(0.47 0.20 25);
+  --color-work: oklch(0.50 0.15 255);
+  --color-attn: oklch(0.50 0.13 85);
+  /* The banner ground, not a text colour: a wash light enough that `fg` still
+     clears AA on it. */
+  --color-attn-dim: oklch(0.95 0.035 85);
 }
 
 html[data-theme='dark'] {
@@ -325,6 +346,15 @@ body {
   .gt-edge-calling {
     stroke-dasharray: 4 4;
   }
+}
+
+/* A panel lifted off the desk. One soft shadow, no ring: the border is
+   already doing the edge, and two treatments on the same 1px read as a
+   mistake at the zoom this app is used at. */
+.gt-panel {
+  box-shadow:
+    0 1px 2px color-mix(in oklch, black 18%, transparent),
+    0 8px 24px -12px color-mix(in oklch, black 30%, transparent);
 }
 
 /* Thin scrollbars inside transcripts */

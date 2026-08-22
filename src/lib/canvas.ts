@@ -9,7 +9,8 @@ import {
 import { personaFromNode } from './library'
 import { DEFAULT_ORCHESTRA, DEFAULT_PANELS } from './types'
 import { justWentQuiet, playDone } from './chime'
-import { useStore } from './store'
+import { addSeat, scrollTo, seatOfCanvas, useDesk } from './desk'
+import { activeStore, useStore, type CanvasStore } from './store'
 
 /** Which canvas to reopen on launch. Per-machine, so not part of the file. */
 const LAST_KEY = 'canvastrator.lastCanvas'
@@ -20,38 +21,54 @@ const rid = () => Math.random().toString(36).slice(2, 10)
 const AUTOSAVE_MS = 1200
 
 /**
- * Set while we're the ones replacing the graph. Loading a canvas changes every
- * node, which would otherwise look like an edit and mark the canvas dirty.
+ * Per canvas, because a desk holds several and they save independently.
+ *
+ * These were module-level singletons back when the store *was* the one open
+ * canvas. Left that way, a load on the canvas you are looking at would
+ * suppress the dirty flag on the one running in the background, and one
+ * canvas's in-flight write would be mistaken for another's.
  */
-let loading = false
+type Book = {
+  /** Set while we're the ones replacing the graph, so a load is not an edit. */
+  loading: boolean
+  /** Bumped whenever this canvas is replaced — opened, cleared, deleted. */
+  epoch: number
+  /** The write currently in flight, so a delete can wait for it. */
+  pendingWrite: Promise<unknown> | null
+  /** Canvas id we've already warned about, so the log isn't spammed per edit. */
+  emptyGuardTripped: string | null
+}
 
-let timer: ReturnType<typeof setTimeout> | null = null
+const books = new WeakMap<CanvasStore, Book>()
 
 /**
- * Bumped whenever the canvas on screen is replaced — opened, cleared, deleted.
- *
- * A save is not instant, and what it does *after* the write is the dangerous
- * half: it records the id as the last canvas and writes it back into the
- * store. Do that for a canvas that was deleted while the write was in flight
- * and you have resurrected it — the pointer says to reopen it, and the next
- * launch does. Catching the id afterwards is not enough either, because a new
- * canvas can have been opened in the meantime and would be overwritten by the
- * finishing save. So the save takes a ticket, and hands nothing back if the
- * canvas moved on while it was away.
+ * The canvases currently being watched, and how to call off a save each one
+ * has queued. A delete has to reach all of them — see `quiesce`.
  */
-let epoch = 0
+const pendingSaves = new Map<CanvasStore, () => void>()
+const openBooks = new Set<Book>()
 
-/**
- * The write currently in flight, so a delete can wait for it.
+function bookOf(store: CanvasStore): Book {
+  let book = books.get(store)
+  if (!book) {
+    book = { loading: false, epoch: 0, pendingWrite: null, emptyGuardTripped: null }
+    books.set(store, book)
+    openBooks.add(book)
+  }
+  return book
+}
+
+/*
+ * `epoch` is a ticket a save takes before it writes. A save is not instant,
+ * and what it does *after* the write is the dangerous half: it records the id
+ * as the last canvas and writes it back into the store. Do that for a canvas
+ * that was deleted while the write was in flight and you have resurrected it.
+ * So the save hands nothing back if its canvas moved on while it was away.
  *
- * Ordering, not exclusion: without this, a save that started before the delete
- * lands after it, and writes the file straight back out of the snapshot it was
- * already holding. The delete then has nothing left to remove — it already ran.
+ * `pendingWrite` is ordering, not exclusion: without it, a save that started
+ * before a delete lands after it and writes the file straight back out of the
+ * snapshot it was already holding.
  */
-let pendingWrite: Promise<unknown> | null = null
-
-/** Canvas id we've already warned about, so the log isn't spammed per edit. */
-let emptyGuardTripped: string | null = null
 
 /**
  * What the Rust side says when the file is simply gone. Anything else is a
@@ -88,14 +105,15 @@ export function beginLaunchRestore() {
   launchPending = true
 }
 
-function suppress<T>(fn: () => T): T {
-  loading = true
+function suppress<T>(store: CanvasStore, fn: () => T): T {
+  const book = bookOf(store)
+  book.loading = true
   try {
     return fn()
   } finally {
     // Cleared after the subscribers for this update have run.
     queueMicrotask(() => {
-      loading = false
+      book.loading = false
     })
   }
 }
@@ -191,16 +209,17 @@ export const listSavedCanvases = (): Promise<CanvasMeta[]> => listCanvases()
  * Write the current graph to disk. Without a name the canvas keeps the one it
  * has; the first save of an unnamed canvas becomes "untitled".
  */
-export async function saveCanvas(name?: string): Promise<boolean> {
-  const s = useStore.getState()
+export async function saveCanvas(name?: string, store: CanvasStore = activeStore()): Promise<boolean> {
+  const book = bookOf(store)
+  const s = store.getState()
   const id = s.canvasId ?? `canvas_${rid()}`
   const canvasName = (name ?? s.canvasName).trim() || 'untitled'
   const updatedAt = Date.now()
 
   // Snapshot first: a streaming turn can land more text while the write is in
   // flight, and that edit must not be marked as saved.
-  const written = useStore.getState()
-  const mine = epoch
+  const written = store.getState()
+  const mine = book.epoch
   try {
     const write = saveCanvasDoc({
       id,
@@ -209,27 +228,27 @@ export async function saveCanvas(name?: string): Promise<boolean> {
       version: CANVAS_VERSION,
       data: serializeCanvas(written),
     })
-    pendingWrite = write
+    book.pendingWrite = write
     try {
       await write
     } finally {
-      if (pendingWrite === write) pendingWrite = null
+      if (book.pendingWrite === write) book.pendingWrite = null
     }
   } catch (e) {
     // A canvas that was deleted mid-write fails here on some paths; that is
     // the delete working, not an error to put in front of the user.
-    if (mine === epoch) useStore.setState({ canvasError: String(e) })
+    if (mine === book.epoch) store.setState({ canvasError: String(e) })
     return false
   }
 
   // The canvas moved on while this was in flight — deleted, cleared, or
   // another one opened. The bytes are written and there is nothing to be done
   // about that, but this must not point the app back at it.
-  if (mine !== epoch) return false
+  if (mine !== book.epoch) return false
 
-  const now = useStore.getState()
+  const now = store.getState()
   rememberLast(id)
-  useStore.setState({
+  store.setState({
     canvasId: id,
     canvasName,
     canvasSavedAt: updatedAt,
@@ -238,7 +257,7 @@ export async function saveCanvas(name?: string): Promise<boolean> {
       now.edges !== written.edges ||
       now.bus !== written.bus ||
       now.globalRules !== written.globalRules ||
-      now.plan !== written.plan ||
+      now.plans !== written.plans ||
       now.panels !== written.panels,
     canvasError: null,
   })
@@ -266,7 +285,28 @@ export async function saveCanvasAs(name: string): Promise<boolean> {
   return saveCanvas(name)
 }
 
+/**
+ * Open a saved canvas on the desk.
+ *
+ * Already open? Go to it. A canvas is a place rather than a document now, and
+ * opening a second copy of one that is already running agents would give the
+ * same file two live editors — the one you were shown would be the one that
+ * lost the race to autosave.
+ *
+ * Otherwise it lands on the canvas in view if that one is blank and unsaved —
+ * the empty desk you just started on is exactly where you meant to put it —
+ * and on a new one beside it if not, so nothing on screen is displaced.
+ */
 export async function openCanvas(id: string): Promise<boolean> {
+  const open = seatOfCanvas(id)
+  if (open) {
+    scrollTo(useDesk.getState().strip.indexOf(open))
+    return true
+  }
+
+  const here = activeStore().getState()
+  if (here.nodes.length || here.canvasId) addSeat()
+
   let doc
   try {
     doc = await loadCanvasDoc(id)
@@ -290,9 +330,10 @@ export async function openCanvas(id: string): Promise<boolean> {
   }
   rememberLast(doc.id)
   detached = false
-  epoch++
-  suppress(() =>
-    useStore.setState({
+  const into = activeStore()
+  bookOf(into).epoch++
+  suppress(into, () =>
+    into.setState({
       ...restored,
       // A saved canvas from another machine may carry no cwd; keep ours.
       cwd: restored.cwd || useStore.getState().cwd,
@@ -330,15 +371,15 @@ function rescuePersonas(data: Parameters<typeof strandedPersonas>[0]) {
 
 /** Start over. The canvas on disk, if any, is left alone. */
 export function newCanvas() {
-  if (timer) clearTimeout(timer)
-  timer = null
-  epoch++
+  const into = activeStore()
+  pendingSaves.get(into)?.()
+  bookOf(into).epoch++
   rememberLast(null)
   // An explicit fresh start is exactly the decision the detached state was
   // waiting for, so autosave may mint again.
   detached = false
-  suppress(() =>
-    useStore.setState({
+  suppress(into, () =>
+    into.setState({
       nodes: [],
       edges: [],
       bus: [],
@@ -352,11 +393,39 @@ export function newCanvas() {
       canvasError: null,
       canvasDialog: null,
       globalRules: '',
-      plan: null,
+      // A new canvas starts shared: one agent has nothing to isolate from.
+      isolateSpawns: false,
+      checkCommand: '',
+      guards: [],
+      plans: [],
       orchestra: { ...DEFAULT_ORCHESTRA },
       panels: { ...DEFAULT_PANELS },
     }),
   )
+}
+
+/**
+ * Empty the canvas you are on, without moving off it.
+ *
+ * Deliberately not `newCanvas`: that starts a *different* canvas, so the file
+ * on disk kept whatever was on it, the row in the list stopped matching what
+ * was on screen, and any panel holding the old id was left pointing at a
+ * canvas nobody could see. Clearing is an edit to this canvas — same id, same
+ * name, same place in the list — so autosave writes the emptied version back
+ * to the file it came from.
+ *
+ * Folders stay, and stay where they are. They are the directories this canvas
+ * is about rather than work done on it, and clearing to start again means
+ * starting again *here*; re-picking the same paths every time would be the
+ * one part of the board the user has to rebuild by hand.
+ */
+export function clearCanvas() {
+  useStore.getState().clearCanvas()
+  // Autosave refuses to write a canvas with no nodes, to protect the only
+  // copy on disk from an accidental emptying. Clearing a canvas that had no
+  // folders on it lands in exactly that shape, and it is not an accident — so
+  // it goes to disk explicitly, which the guard leaves room for.
+  if (useStore.getState().canvasId) void saveCanvas()
 }
 
 /**
@@ -369,10 +438,11 @@ export function newCanvas() {
  * the canvas the user deleted.
  */
 async function quiesce() {
-  if (timer) clearTimeout(timer)
-  timer = null
-  // A failed write is still a finished one, and that is all this waits for.
-  await pendingWrite?.catch(() => {})
+  // Every canvas on the desk, not just the one in view: the file about to go
+  // may belong to one running in the background, and its autosave competes
+  // with the delete exactly as the foreground one would.
+  for (const cancel of pendingSaves.values()) cancel()
+  await Promise.all([...openBooks].map((b) => b.pendingWrite?.catch(() => {})))
 }
 
 /** Delete a saved canvas. */
@@ -380,7 +450,9 @@ export async function deleteCanvas(id: string): Promise<boolean> {
   await quiesce()
   // Before the delete, so a save that slips in behind it knows the canvas has
   // moved on and keeps its hands off the pointer.
-  if (useStore.getState().canvasId === id) epoch++
+  for (const store of pendingSaves.keys()) {
+    if (store.getState().canvasId === id) bookOf(store).epoch++
+  }
 
   try {
     await deleteCanvasDoc(id)
@@ -399,7 +471,9 @@ export async function deleteCanvas(id: string): Promise<boolean> {
  */
 export async function deleteCanvases(ids: string[]): Promise<string[]> {
   await quiesce()
-  if (ids.includes(useStore.getState().canvasId ?? '')) epoch++
+  for (const store of pendingSaves.keys()) {
+    if (ids.includes(store.getState().canvasId ?? '')) bookOf(store).epoch++
+  }
 
   const gone: string[] = []
   const failed: string[] = []
@@ -473,15 +547,15 @@ export function watchCompletion(): () => void {
   })
 }
 
-export function watchLayout(): () => void {
+export function watchLayout(store: CanvasStore = activeStore()): () => void {
   let known = new Set(useStore.getState().nodes.map((n) => n.id))
   let timer: ReturnType<typeof setTimeout> | null = null
 
-  const unsubscribe = useStore.subscribe((s) => {
+  const unsubscribe = store.subscribe((s) => {
     const ids = new Set(s.nodes.map((n) => n.id))
     const changed = ids.size !== known.size || [...ids].some((id) => !known.has(id))
     known = ids
-    if (!changed || !s.autoTidy || loading) return
+    if (!changed || !s.autoTidy || bookOf(store).loading) return
 
     if (timer) clearTimeout(timer)
     // Long enough that a burst of file nodes settles into one pass.
@@ -499,10 +573,17 @@ export function watchLayout(): () => void {
   }
 }
 
-export function watchCanvas(): () => void {
-  let seen = useStore.getState()
+export function watchCanvas(store: CanvasStore = activeStore()): () => void {
+  const book = bookOf(store)
+  let seen = store.getState()
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const cancel = () => {
+    if (timer) clearTimeout(timer)
+    timer = null
+  }
+  pendingSaves.set(store, cancel)
 
-  const unsubscribe = useStore.subscribe((s) => {
+  const unsubscribe = store.subscribe((s) => {
     const changed =
       s.nodes !== seen.nodes ||
       s.edges !== seen.edges ||
@@ -510,44 +591,47 @@ export function watchCanvas(): () => void {
       s.globalRules !== seen.globalRules ||
       // A plan is work the user agreed to, or is about to; losing it to a
       // crash would mean reading the orchestrator's reasoning over again.
-      s.plan !== seen.plan ||
+      s.plans !== seen.plans ||
       s.planning !== seen.planning ||
+      s.isolateSpawns !== seen.isolateSpawns ||
+      s.checkCommand !== seen.checkCommand ||
+      s.guards !== seen.guards ||
       s.orchestra !== seen.orchestra ||
       // Which readouts are showing is part of how this canvas is set up, so
       // opening one is an edit — the same way placing the node used to be.
       s.panels !== seen.panels
     seen = s
-    if (!changed || loading) return
+    if (!changed || book.loading) return
 
-    if (!s.canvasDirty) useStore.setState({ canvasDirty: true })
+    if (!s.canvasDirty) store.setState({ canvasDirty: true })
     if (!s.nodes.length) {
       // Never let autosave write an empty graph. Reaching zero nodes is far
       // more often a bug or a mis-click than an edit worth persisting, and the
       // saved canvas is the only copy. An explicit save still goes through.
       if (!s.canvasId) return
-      if (emptyGuardTripped !== s.canvasId) {
-        emptyGuardTripped = s.canvasId
+      if (book.emptyGuardTripped !== s.canvasId) {
+        book.emptyGuardTripped = s.canvasId
         console.warn('canvastrator: canvas is empty — autosave skipped to protect the saved copy')
       }
       return
     }
-    emptyGuardTripped = null
+    book.emptyGuardTripped = null
 
     // Minting a *new* canvas is the only thing gated here. A canvas that
     // already has a file goes on saving to it either way — the risk being
     // guarded against is a second file, not a lost edit.
     if (!s.canvasId && (launchPending || detached)) return
 
-    if (timer) clearTimeout(timer)
+    cancel()
     timer = setTimeout(() => {
       timer = null
-      void saveCanvas()
+      void saveCanvas(undefined, store)
     }, AUTOSAVE_MS)
   })
 
   return () => {
-    if (timer) clearTimeout(timer)
-    timer = null
+    cancel()
+    pendingSaves.delete(store)
     unsubscribe()
   }
 }

@@ -4,9 +4,16 @@
 //! Canvastrator knows about them or not. Two sources, used together:
 //!
 //! - The **live list** in a provider's startup event — authoritative, includes
-//!   plugin skills, but names only.
-//! - The **files on disk** — slower to trust, but they carry the description,
-//!   which is the part a human (or an orchestrator) needs to choose one.
+//!   the CLI's own built-in skills, which exist only inside its binary and
+//!   cannot be found on disk at all. Names only, no descriptions.
+//! - The **files on disk** — everything installed for the user, the project,
+//!   and each installed plugin. Slower to trust, but these carry the
+//!   description, which is the part a human (or an orchestrator) needs in
+//!   order to choose one.
+//!
+//! Commands count as skills here. `/wt` and a SKILL.md are different files in
+//! different directories, but from the canvas they are the same thing: a named
+//! capability the agent already has, which you either invoke or wire in.
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +28,9 @@ pub struct DiscoveredSkill {
     pub provider: String,
     /// "user", "project", or the plugin it came from.
     pub source: String,
+    /// `skill` for a SKILL.md, `command` for a slash command file. Both are
+    /// capabilities; only the second is invoked by typing its name.
+    pub kind: String,
     pub path: String,
 }
 
@@ -84,6 +94,7 @@ fn read_skill(dir: &Path, provider: &str, source: &str) -> Option<DiscoveredSkil
         description,
         provider: provider.to_string(),
         source: source.to_string(),
+        kind: "skill".into(),
         path: file.to_string_lossy().into_owned(),
     })
 }
@@ -130,10 +141,86 @@ fn scan_flat_dir(root: &Path, provider: &str, source: &str, out: &mut Vec<Discov
                 description: description.chars().take(300).collect(),
                 provider: provider.to_string(),
                 source: source.to_string(),
+                kind: "command".into(),
                 path: path.to_string_lossy().into_owned(),
             });
         }
     }
+}
+
+
+/// `<root>/**/<name>.md` — slash commands, which nest into namespaces.
+///
+/// A file at `commands/git/sync.md` is invoked as `/git:sync`, so the
+/// directories are part of the name rather than decoration: flattening them
+/// produces two different commands both called `sync`.
+fn scan_commands(root: &Path, provider: &str, source: &str, prefix: &str, out: &mut Vec<DiscoveredSkill>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        if path.is_dir() {
+            let nested = if prefix.is_empty() { stem } else { format!("{prefix}:{stem}") };
+            scan_commands(&path, provider, source, &nested, out);
+            continue;
+        }
+        if path.extension().is_none_or(|x| x != "md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let described = parse_frontmatter(&text).map(|(_, d)| d).unwrap_or_else(|| {
+            // No frontmatter: the first line of prose is the closest thing to
+            // a description, and is what the CLI's own picker shows.
+            text.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with("---") && !l.starts_with('#'))
+                .unwrap_or("")
+                .to_string()
+        });
+        let name = if prefix.is_empty() { stem } else { format!("{prefix}:{stem}") };
+        out.push(DiscoveredSkill {
+            name,
+            description: described.chars().take(300).collect(),
+            provider: provider.to_string(),
+            source: source.to_string(),
+            kind: "command".into(),
+            path: path.to_string_lossy().into_owned(),
+        });
+    }
+}
+
+/// Every plugin the user actually has installed, as `(label, install path)`.
+///
+/// Read from the install manifest rather than by walking the plugin cache. The
+/// cache keeps every version ever downloaded — eight copies of one plugin is
+/// normal — so walking it means reading the same skills eight times and then
+/// picking a description from whichever stale version happened to sort first.
+/// The manifest names the one version that is actually loaded.
+fn installed_plugins(home: &Path) -> Vec<(String, PathBuf)> {
+    let text = match std::fs::read_to_string(home.join(".claude/plugins/installed_plugins.json")) {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return vec![];
+    };
+    let Some(plugins) = json.get("plugins").and_then(|p| p.as_object()) else {
+        return vec![];
+    };
+
+    let mut out = vec![];
+    for (key, entries) in plugins {
+        // `name@marketplace` — the name alone is what the user calls it.
+        let label = key.split('@').next().unwrap_or(key).to_string();
+        for e in entries.as_array().into_iter().flatten() {
+            if let Some(path) = e.get("installPath").and_then(|p| p.as_str()) {
+                out.push((label.clone(), PathBuf::from(path)));
+            }
+        }
+    }
+    out
 }
 
 /// Everything installed for any provider, plus anything in the given project.
@@ -143,31 +230,16 @@ pub fn discover_skills(cwd: Option<String>) -> Vec<DiscoveredSkill> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
 
     if let Some(home) = &home {
-        // claude: user-level
         scan_skills_dir(&home.join(".claude/skills"), "claude", "user", &mut out);
+        scan_commands(&home.join(".claude/commands"), "claude", "user", "", &mut out);
 
-        // claude: plugins, at cache/<marketplace>/<plugin>/<version>/skills/*
-        if let Ok(markets) = std::fs::read_dir(home.join(".claude/plugins/cache")) {
-            for market in markets.flatten() {
-                if let Ok(plugins) = std::fs::read_dir(market.path()) {
-                    for plugin in plugins.flatten() {
-                        let label = plugin.file_name().to_string_lossy().to_string();
-                        if let Ok(versions) = std::fs::read_dir(plugin.path()) {
-                            for version in versions.flatten() {
-                                scan_skills_dir(
-                                    &version.path().join("skills"),
-                                    "claude",
-                                    &label,
-                                    &mut out,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+        // Each installed plugin contributes both kinds, under its own name.
+        for (label, path) in installed_plugins(home) {
+            scan_skills_dir(&path.join("skills"), "claude", &label, &mut out);
+            scan_commands(&path.join("commands"), "claude", &label, &label, &mut out);
         }
 
-        // opencode and codex keep flat command/prompt files.
+        // opencode and codex keep flat command files.
         for (dir, provider) in [
             (home.join(".config/opencode/command"), "opencode"),
             (home.join(".opencode/command"), "opencode"),
@@ -177,15 +249,32 @@ pub fn discover_skills(cwd: Option<String>) -> Vec<DiscoveredSkill> {
         }
     }
 
-    // Project-level skills only exist once a folder is wired in.
+    // Project-level capabilities only exist once a folder is wired in.
     if let Some(cwd) = cwd {
         let root = PathBuf::from(&cwd);
         scan_skills_dir(&root.join(".claude/skills"), "claude", "project", &mut out);
+        scan_commands(&root.join(".claude/commands"), "claude", "project", "", &mut out);
         scan_flat_dir(&root.join(".opencode/command"), "opencode", "project", &mut out);
+        scan_flat_dir(&root.join(".codex/prompts"), "codex", "project", &mut out);
     }
 
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    // Project beats user beats plugin for the same name, which is the order
+    // the CLIs themselves resolve in: the nearest definition wins.
+    fn rank(source: &str) -> u8 {
+        match source {
+            "project" => 0,
+            "user" => 1,
+            _ => 2,
+        }
+    }
+    out.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.provider.cmp(&b.provider))
+            .then(rank(&a.source).cmp(&rank(&b.source)))
+    });
     out.dedup_by(|a, b| a.name == b.name && a.provider == b.provider);
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
@@ -260,6 +349,65 @@ mod tests {
     fn discovery_never_panics_on_a_machine_with_nothing_installed() {
         let found = discover_skills(Some("/nonexistent/project".into()));
         assert!(found.iter().all(|s| !s.name.is_empty()));
+    }
+
+    /// Namespaced commands keep their directory in the name, because that is
+    /// how they are invoked and because two `sync.md` files in two namespaces
+    /// are two different commands.
+    #[test]
+    fn commands_nest_into_namespaces() {
+        let dir = std::env::temp_dir().join(format!("gt-cmds-{}", std::process::id()));
+        let nested = dir.join("git");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.join("wt.md"), "Make a worktree for the branch.\n").unwrap();
+        std::fs::write(
+            nested.join("sync.md"),
+            "---\nname: sync\ndescription: Rebase onto main\n---\nbody",
+        )
+        .unwrap();
+
+        let mut out = vec![];
+        scan_commands(&dir, "claude", "user", "", &mut out);
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].name, "git:sync");
+        assert_eq!(out[0].description, "Rebase onto main");
+        assert_eq!(out[0].kind, "command");
+        assert_eq!(out[1].name, "wt");
+        // No frontmatter: the first line of prose stands in for a description.
+        assert_eq!(out[1].description, "Make a worktree for the branch.");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The manifest names one install path per plugin. Walking the cache
+    /// instead reads every version ever downloaded — eight copies of one
+    /// plugin is normal — and takes its description from whichever stale one
+    /// sorts first.
+    #[test]
+    fn plugins_come_from_the_install_manifest() {
+        let home = std::env::temp_dir().join(format!("gt-home-{}", std::process::id()));
+        let plugins = home.join(".claude/plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(
+            plugins.join("installed_plugins.json"),
+            r#"{"version":2,"plugins":{"stripe@official":[{"scope":"user","installPath":"/tmp/stripe/0.6.3"}]}}"#,
+        )
+        .unwrap();
+
+        let found = installed_plugins(&home);
+        assert_eq!(found.len(), 1);
+        // The marketplace suffix is not what the user calls it.
+        assert_eq!(found[0].0, "stripe");
+        assert_eq!(found[0].1, PathBuf::from("/tmp/stripe/0.6.3"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A missing manifest is a user with no plugins, not an error: discovery
+    /// still has four other sources to report.
+    #[test]
+    fn a_missing_manifest_is_simply_no_plugins() {
+        assert!(installed_plugins(Path::new("/nonexistent")).is_empty());
     }
 }
 

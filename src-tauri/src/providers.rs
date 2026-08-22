@@ -387,6 +387,20 @@ fn parse_claude(v: &Value) -> Vec<AgentEvent> {
         // ...so from the assembled message we only take tool calls, or the
         // text if partial streaming wasn't available.
         Some("assistant") => {
+            // Usage rides on every assistant message and describes that one
+            // API call: fresh input, what was written to cache, and what was
+            // read back from it. Their sum is the prompt the model just read,
+            // which is the only honest reading of how full the window is.
+            if let Some(tokens) = sum_tokens(
+                v.get("message").and_then(|m| m.get("usage")),
+                &[
+                    "input_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ],
+            ) {
+                out.push(AgentEvent::Context { tokens });
+            }
             if let Some(blocks) = v
                 .get("message")
                 .and_then(|m| m.get("content"))
@@ -444,18 +458,12 @@ fn parse_claude(v: &Value) -> Vec<AgentEvent> {
                         .get("usage")
                         .and_then(|u| u.get("output_tokens"))
                         .and_then(Value::as_u64),
-                    // The prompt this turn actually carried. Claude reports the
-                    // cached part separately and `input_tokens` counts only what
-                    // was not cached, so summing the three is the only way to
-                    // learn how full the window is.
-                    context_tokens: sum_tokens(
-                        v.get("usage"),
-                        &[
-                            "input_tokens",
-                            "cache_creation_input_tokens",
-                            "cache_read_input_tokens",
-                        ],
-                    ),
+                    // Nothing: the `result` usage is the sum over every API
+                    // call the run made, so deriving a window size from it
+                    // reports a conversation many times larger than the one
+                    // that exists. The per-message `Context` events above
+                    // carry that figure instead.
+                    context_tokens: None,
                 });
             }
         }
@@ -926,16 +934,40 @@ mod tests {
     /// the prompt it actually read is the whole history. A meter built on the
     /// billed figure would show an almost-empty window on a conversation about
     /// to overflow — the one moment it exists to warn about.
+    ///
+    /// It comes off each assistant message because that is one API call. The
+    /// `result` totals are the sum over every call the run made, and a tool
+    /// loop makes dozens: the same cached history counted once per call adds
+    /// up to millions of tokens against a window holding thousands.
     #[test]
-    fn claude_context_tokens_count_the_cached_prompt_too() {
-        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":120,"cache_creation_input_tokens":4000,"cache_read_input_tokens":90000,"output_tokens":50}}"#;
+    fn claude_context_tokens_come_from_one_api_call() {
+        let line = r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":120,"cache_creation_input_tokens":4000,"cache_read_input_tokens":90000,"output_tokens":50}}}"#;
+        match Provider::Claude.parse_line(line).as_slice() {
+            [AgentEvent::Context { tokens }] => assert_eq!(*tokens, 94_120),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// The end-of-run totals must not be mistaken for a window size, however
+    /// tempting the field names are.
+    #[test]
+    fn claude_result_totals_are_not_a_window_size() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":120,"cache_read_input_tokens":9000000,"output_tokens":50}}"#;
         match Provider::Claude.parse_line(line).as_slice() {
             [AgentEvent::Result { input_tokens, context_tokens, .. }] => {
                 assert_eq!(*input_tokens, Some(120));
-                assert_eq!(*context_tokens, Some(94_120));
+                assert_eq!(*context_tokens, None);
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// An assistant message with no usage says nothing about the window, and
+    /// must not report zero.
+    #[test]
+    fn claude_assistant_without_usage_reports_no_context() {
+        let line = r#"{"type":"assistant","message":{"content":[]}}"#;
+        assert!(Provider::Claude.parse_line(line).is_empty());
     }
 
     /// A turn that reported no usage at all must not read as a turn that used

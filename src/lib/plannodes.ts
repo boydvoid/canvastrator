@@ -13,7 +13,9 @@
  * is the same reason a session's working directory is read off its folder edge
  * rather than kept as a second copy on the node.
  */
-import type { Edge, Node } from '@xyflow/react'
+import { Position } from '@xyflow/react'
+import type { Edge, Node, NodeHandle } from '@xyflow/react'
+import { addSlots } from './plan'
 import type { GtNode } from './store'
 import type { Plan, PlanStep } from './types'
 
@@ -29,6 +31,15 @@ export const PLAN_STEP_SIZE = { w: 210, h: 74 }
  * is a node it draws with `visibility: hidden`.
  */
 export const SHAPE_SIZE = { w: 300, h: 164 }
+
+/**
+ * The button that puts a step of your own into the running order.
+ *
+ * Small on purpose. It is an insertion point, not a step, and it sits in the
+ * gap between two of them — big enough to hit, small enough that a row of
+ * them does not read as another rank of nodes.
+ */
+export const PLAN_ADD_SIZE = { w: 22, h: 22 }
 
 /** Extra room for the mismatch warning, which is a paragraph when it appears. */
 const WARNING_H = 52
@@ -50,16 +61,67 @@ const LEAD_X = 150
  */
 const RISE_Y = 80
 
+/**
+ * Between one plan's row and the next one stacked above it.
+ *
+ * An orchestrator fixing two things at once has two plans, and they are two
+ * jobs rather than one long one — so they get a band each, in the order they
+ * were proposed, and the oldest keeps the place nearest the agent. Stacking
+ * upward from the oldest is what makes a new plan appear without shoving the
+ * one you were reading somewhere else.
+ */
+const PLAN_GAP_Y = 30
+
+/**
+ * Where a wire meets one of these nodes, declared rather than measured.
+ *
+ * React Flow reads handle positions off the DOM and caches them on the node
+ * object it measured. These nodes are rebuilt from the plan on every render,
+ * so that cache is discarded as fast as it is filled — and an edge with no
+ * bounds at either end is not drawn at all. That is why a plan appeared as a
+ * row of boxes with nothing between them: the steps were there, the wires
+ * were in the graph, and every one of them was skipped for want of a handle.
+ *
+ * Declaring the geometry takes the DOM out of it. We already know where these
+ * handles are — we chose the sizes a few lines up — so nothing here can go
+ * stale, and no amount of rebuilding costs the plan its wires. Kept in step
+ * with the `Handle`s in `PlanStepNode` and `ShapeNode` by hand: same ids, same
+ * sides. A one-pixel box is enough, since React Flow only reads its centre.
+ */
+const handle = (
+  id: string,
+  type: NodeHandle['type'],
+  position: Position,
+  x: number,
+  y: number,
+): NodeHandle => ({ id, type, position, x, y, width: 1, height: 1 })
+
+/** The left and right ends of a node that sits in the running order. */
+const inOut = (id: [string, string], w: number, h: number): NodeHandle[] => [
+  handle(id[0], 'target', Position.Left, 0, h / 2),
+  handle(id[1], 'source', Position.Right, w - 1, h / 2),
+]
+
 /** What a shape node carries. The plan itself is read live from the store. */
 export type ShapeNodeData = {
-  fromNodeId: string
+  planId: string
+}
+
+/** What an insertion point carries: which plan, and where in its order. */
+export type PlanAddNodeData = {
+  planId: string
+  index: number
 }
 
 /** What a step node carries. The step itself is read live from the store. */
 export type PlanStepNodeData = {
+  /** Which plan it belongs to — a canvas holds several at once. */
+  planId: string
   stepId: string
   /** Its place in the running order, for the number in the corner. */
   index: number
+  /** How many steps there are, so a step can say 2/3 rather than 2. */
+  count: number
   /** Denormalised so the node has something to draw before it subscribes. */
   persona: string
   state: PlanStep['state']
@@ -69,26 +131,57 @@ export type PlanFlow = { nodes: Node[]; edges: Edge[] }
 
 const EMPTY: PlanFlow = { nodes: [], edges: [] }
 
+/** How tall one plan's band is: its steps, or its card where that is taller. */
+const bandHeight = (plan: Plan) =>
+  Math.max(PLAN_STEP_SIZE.h, plan.pattern ? shapeHeight(plan) : 0)
+
+/** The card grows by a paragraph when the plan and its shape disagree. */
+const shapeHeight = (plan: Plan) => SHAPE_SIZE.h + (plan.warning ? WARNING_H : 0)
+
 /**
- * The step nodes and the wires between them.
+ * Every plan on the canvas, drawn as the flow it describes.
  *
- * Returns nothing when there is no plan, or when the agent that wrote it has
- * been deleted — steps anchored to a missing orchestrator would float on the
- * canvas with nothing to explain where they came from.
+ * Plans are grouped by the agent that wrote them and stacked in the band above
+ * it, oldest nearest. A plan whose orchestrator has been deleted draws nothing:
+ * steps anchored to a missing agent would float with nothing to explain where
+ * they came from.
  */
-export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFlow {
-  if (!plan?.steps.length) return EMPTY
+export function planFlow(plans: Plan[], nodes: GtNode[]): PlanFlow {
+  if (!plans.length) return EMPTY
 
-  const anchor = nodes.find((n) => n.id === plan.fromNodeId)
-  if (!anchor) return EMPTY
+  const out: PlanFlow = { nodes: [], edges: [] }
+  const byAnchor = new Map<string, Plan[]>()
+  for (const plan of plans) {
+    if (!plan.steps.length) continue
+    const group = byAnchor.get(plan.fromNodeId)
+    if (group) group.push(plan)
+    else byAnchor.set(plan.fromNodeId, [plan])
+  }
 
+  for (const [anchorId, group] of byAnchor) {
+    const anchor = nodes.find((n) => n.id === anchorId)
+    if (!anchor) continue
+    let rise = RISE_Y
+    for (const plan of group) {
+      const band = planBand(plan, anchor, rise, nodes)
+      out.nodes.push(...band.nodes)
+      out.edges.push(...band.edges)
+      rise += bandHeight(plan) + PLAN_GAP_Y
+    }
+  }
+
+  return out
+}
+
+/** One plan, laid out `rise` above the agent that wrote it. */
+function planBand(plan: Plan, anchor: GtNode, rise: number, nodes: GtNode[]): PlanFlow {
   // The shape card sits directly above the orchestrator that chose it, and the
   // steps run to its right. Read left to right, the band above the agent is
   // the decision and then its consequences, which is the order they happened
   // in — see `ShapeNode` for why the shape gets a card of its own at all.
   const shapeLeft = anchor.position.x
   const left = shapeLeft + SHAPE_SIZE.w + SHAPE_GAP_X + LEAD_X
-  const top = anchor.position.y - PLAN_STEP_SIZE.h - RISE_Y
+  const top = anchor.position.y - PLAN_STEP_SIZE.h - rise
 
   const stepNodes: Node[] = plan.steps.map((step, i) => ({
     id: planNodeId(step.id),
@@ -96,6 +189,7 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
     position: { x: left + i * (PLAN_STEP_SIZE.w + GAP_X), y: top },
     width: PLAN_STEP_SIZE.w,
     height: PLAN_STEP_SIZE.h,
+    handles: inOut(['step-in', 'step-out'], PLAN_STEP_SIZE.w, PLAN_STEP_SIZE.h),
     // Positions are computed, so dragging one would spring back on the next
     // render — better to not offer the handle than to offer one that lies.
     draggable: false,
@@ -104,8 +198,10 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
     selectable: false,
     deletable: false,
     data: {
+      planId: plan.id,
       stepId: step.id,
       index: i,
+      count: plan.steps.length,
       persona: step.persona,
       state: step.state,
     } satisfies PlanStepNodeData,
@@ -117,10 +213,10 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
   // runs — in order, the safe reading — so its absence is not an error and
   // draws no card rather than a card that says "unknown".
   const hasShape = !!plan.pattern
-  const shapeH = SHAPE_SIZE.h + (plan.warning ? WARNING_H : 0)
+  const shapeH = shapeHeight(plan)
   if (hasShape) {
     stepNodes.unshift({
-      id: shapeNodeId(plan.fromNodeId),
+      id: shapeNodeId(plan.id),
       type: 'shape',
       position: {
         x: shapeLeft,
@@ -130,23 +226,34 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
       },
       width: SHAPE_SIZE.w,
       height: shapeH,
+      // The card takes its wire in from below, where the orchestrator is.
+      handles: [
+        handle('shape-in', 'target', Position.Bottom, SHAPE_SIZE.w / 2 - 1, shapeH - 1),
+        handle('shape-out', 'source', Position.Right, SHAPE_SIZE.w - 1, shapeH / 2),
+      ],
       draggable: false,
       selectable: false,
       deletable: false,
-      data: { fromNodeId: plan.fromNodeId } satisfies ShapeNodeData,
+      data: { planId: plan.id } satisfies ShapeNodeData,
     })
   }
 
   // Into the first step, from the shape card where there is one. `spawns`
   // because that is what a step is: the handle a real child hangs off, holding
   // the one not yet made.
+  // The pattern rides on every wire of the plan, so the card and the steps it
+  // produced read as one object rather than as a card that happens to sit next
+  // to some boxes. See `PlanEdge`.
+  const rail = plan.pattern ? { pattern: plan.pattern.id } : undefined
+
   edges.push({
     id: `planlead_${plan.fromNodeId}_${plan.steps[0].id}`,
-    source: hasShape ? shapeNodeId(plan.fromNodeId) : plan.fromNodeId,
+    source: hasShape ? shapeNodeId(plan.id) : plan.fromNodeId,
     sourceHandle: hasShape ? 'shape-out' : 'spawns',
     target: planNodeId(plan.steps[0].id),
     targetHandle: 'step-in',
     type: 'plan',
+    data: rail,
     selectable: false,
     deletable: false,
   })
@@ -154,12 +261,13 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
   // The orchestrator up into the card, so the decision is visibly its.
   if (hasShape) {
     edges.push({
-      id: `planshape_${plan.fromNodeId}`,
+      id: `planshape_${plan.id}`,
       source: plan.fromNodeId,
       sourceHandle: 'spawns',
-      target: shapeNodeId(plan.fromNodeId),
+      target: shapeNodeId(plan.id),
       targetHandle: 'shape-in',
       type: 'plan',
+      data: rail,
       selectable: false,
       deletable: false,
     })
@@ -174,6 +282,7 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
       target: planNodeId(plan.steps[i].id),
       targetHandle: 'step-in',
       type: 'plan',
+      data: rail,
       selectable: false,
       deletable: false,
     })
@@ -198,7 +307,29 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
     })
   }
 
-  return { nodes: stepNodes, edges }
+  // Somewhere to put a step of your own, in every gap the running order still
+  // has a future in. They are nodes rather than something drawn on the step
+  // cards because the last one belongs after the final step, where there is no
+  // card to hang it off — and an insertion point that exists in three of four
+  // gaps teaches the wrong rule.
+  const addNodes: Node[] = addSlots(plan.steps).map((i) => ({
+    id: addNodeId(plan.id, i),
+    type: 'planadd',
+    position: {
+      // Half a gap before the step it would push along, which for the slot at
+      // the end is half a gap past the last step's right edge.
+      x: left + i * (PLAN_STEP_SIZE.w + GAP_X) - GAP_X / 2 - PLAN_ADD_SIZE.w / 2,
+      y: top + (PLAN_STEP_SIZE.h - PLAN_ADD_SIZE.h) / 2,
+    },
+    width: PLAN_ADD_SIZE.w,
+    height: PLAN_ADD_SIZE.h,
+    draggable: false,
+    selectable: false,
+    deletable: false,
+    data: { planId: plan.id, index: i } satisfies PlanAddNodeData,
+  }))
+
+  return { nodes: [...stepNodes, ...addNodes], edges }
 }
 
 /**
@@ -209,5 +340,11 @@ export function planFlow(plan: Plan | null | undefined, nodes: GtNode[]): PlanFl
  */
 export const planNodeId = (stepId: string) => `plannode_${stepId}`
 
-/** The canvas id for the shape card, one per plan, keyed by its author. */
-export const shapeNodeId = (fromNodeId: string) => `shapenode_${fromNodeId}`
+/**
+ * The canvas id for an insertion point, keyed by the slot rather than by a
+ * step: the slot at the end has no step to name it after.
+ */
+export const addNodeId = (planId: string, index: number) => `planadd_${planId}_${index}`
+
+/** The canvas id for the shape card, one per plan. */
+export const shapeNodeId = (planId: string) => `shapenode_${planId}`

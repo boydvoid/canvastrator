@@ -1,4 +1,6 @@
-import { create } from 'zustand'
+import { createContext, useContext, useRef, useSyncExternalStore } from 'react'
+import { useStore as useZustandStore } from 'zustand'
+import { createStore, type StoreApi } from 'zustand/vanilla'
 import {
   addEdge,
   applyEdgeChanges,
@@ -15,12 +17,19 @@ import {
   fileExists,
   fileStamp,
   interruptSession,
+  runCheck,
   sendTurn,
   terminalClose,
+  worktreeAdd,
+  worktreeRemove,
+  writeNote,
 } from './bridge'
 import { forgetEmulator } from './terminals'
 import { digest, readShared } from './filecache'
+import { lastSaid } from './asking'
+import { freshFor } from './sharedcontext'
 import { attachableImage } from './filekind'
+import { carryBlock, COMPACT_PROMPT, noteFile, noteName } from './compact'
 import { handBack, parseReport, REPORT_INSTRUCTION, reportBlock } from './report'
 import { looksLikeQuestion } from './asking'
 import { boxOf, FILE_SIZE, findFreeSpot, layoutCanvas, SESSION_SIZE, sizeOf } from './layout'
@@ -34,7 +43,18 @@ import {
   patternBlock,
   type PatternId,
 } from './patterns'
-import { nextStep, parsePlan, planLive } from './plan'
+import {
+  findStep,
+  insertStep,
+  MAX_PLAN_STEPS,
+  MAX_PLANS,
+  nextStep,
+  parsePlan,
+  planLive,
+  planOfReply,
+  stepReady,
+  withPlan,
+} from './plan'
 import { headlineOf, summarizeTurn } from './summary'
 import type { Density } from './density'
 import { isBellKind } from './pulse'
@@ -72,7 +92,7 @@ import type {
   PlanStep,
   Provider,
   ProviderStatus,
-  LandingNodeData,
+  ChangesNodeData,
   RightTab,
   SessionNodeData,
   SkillNodeData,
@@ -97,7 +117,7 @@ export type GtNode =
   | (Node<FileNodeData> & { type: 'file' })
   | (Node<McpNodeData> & { type: 'mcp' })
   | (Node<McpToolNodeData> & { type: 'mcptool' })
-  | (Node<LandingNodeData> & { type: 'landing' })
+  | (Node<ChangesNodeData> & { type: 'changes' })
   | (Node<TerminalNodeData> & { type: 'terminal' })
 
 const uid = () => Math.random().toString(36).slice(2, 10)
@@ -116,7 +136,7 @@ const MAX_AUTO_FILES_PER_SESSION = 10
 /** Kept in the feed before the oldest fall off. */
 const MAX_NOTIFICATIONS = 200
 
-type State = {
+export type State = {
   nodes: GtNode[]
   edges: Edge[]
   providers: ProviderStatus[]
@@ -156,6 +176,15 @@ type State = {
   panels: Panels
   /** Session node the chat panel is pointed at. Falls back to the orchestrator. */
   chatTarget: string | null
+  /**
+   * Text another surface wants typed into the chatbox.
+   *
+   * The draft itself belongs to the composer — it is keyed to the session, and
+   * pulling it into the store would mean every keystroke re-rendering the
+   * canvas. This is a one-shot handoff: a panel leaves a skill's name here,
+   * the composer types it and clears it.
+   */
+  composerSeed: string | null
 
   /**
    * Which models the user wants this canvas's orchestrator reaching for. Read
@@ -188,18 +217,44 @@ type State = {
   /** Start an agent configured by a library persona. */
   addSessionFromPersona: (persona: Persona, pos: { x: number; y: number }) => string
   addSkill: (pos: { x: number; y: number }, seed?: Partial<SkillNodeData>) => string
-  addFolder: (path: string, pos: { x: number; y: number }) => string
+  addFolder: (path: string, pos: { x: number; y: number }, seed?: Partial<FolderNodeData>) => string
+  /**
+   * Put a worktree on the canvas, before it exists.
+   *
+   * The node lands where you asked for it and takes the branch name there;
+   * `createWorktree` is what cuts the checkout. Returns the node's id, or null
+   * when there is no repository on the canvas to branch from.
+   */
+  addWorktree: (pos: { x: number; y: number }) => string | null
+  /** Cut the checkout a draft worktree node is standing in for. */
+  createWorktree: (nodeId: string, name: string) => Promise<{ error: string } | null>
+  /**
+   * Delete a worktree's checkout from disk, and the node with it.
+   *
+   * Refused by git while the checkout still holds uncommitted work, which is
+   * the safety: that is where an agent's last hour lives.
+   */
+  removeWorktree: (nodeId: string) => Promise<{ error: string } | null>
   /**
    * Give a session another folder to reach. Reuses a folder node already on
    * the canvas for that path rather than adding a second one for the same
    * directory. Returns the folder node's id, or null when it was already wired
    * into this session.
    */
-  attachFolder: (sessionNodeId: string, path: string) => string | null
+  attachFolder: (sessionNodeId: string, path: string, seed?: Partial<FolderNodeData>) => string | null
   /** Unwire a folder from a session. The node stays — it may feed others. */
   detachFolder: (sessionNodeId: string, folderNodeId: string) => void
   /** Make an attached folder the working directory, demoting the incumbent. */
   setPrimaryFolder: (sessionNodeId: string, folderNodeId: string) => void
+  /**
+   * Give an agent its own checkout of the repository it is working in.
+   *
+   * Returns the branch it landed on, or an error string to show. Resolves
+   * nothing else: the worktree arrives on the canvas as an ordinary folder
+   * node, wired in as this agent's working directory, because it is an
+   * ordinary directory that now exists.
+   */
+  isolateSession: (sessionNodeId: string) => Promise<{ branch: string } | { error: string }>
   addFile: (path: string, pos: { x: number; y: number }, origin?: 'user' | 'agent') => string
   addMcp: (server: McpServer, pos: { x: number; y: number }) => string
   /** Show a floating panel, or put it away again. */
@@ -212,11 +267,20 @@ type State = {
    * revealing a minimized header would not have answered it.
    */
   showPanel: (key: PanelKey) => void
-  /** The Landing module. One per canvas, for the same reason as the others. */
-  addLanding: (pos: { x: number; y: number }) => string
+  /**
+   * Put a note on the shared board by hand.
+   *
+   * Delivered to every agent on its next turn, exactly like a summary an agent
+   * wrote — the fact everyone needs is as often yours as an agent's.
+   */
+  postNote: (body: string) => void
+  /** Take an entry off the board. Nothing is un-delivered by this. */
+  removeNote: (id: string) => void
+  /** The Changes module. One per canvas, for the same reason as the others. */
+  addChanges: (pos: { x: number; y: number }) => string
   /**
    * A shell on the canvas. Several are fine — one per thing you are watching —
-   * unlike the Landing module, which has nothing to distinguish two copies.
+   * unlike the Changes module, which has nothing to distinguish two copies.
    */
   addTerminal: (pos: { x: number; y: number }) => string
   /**
@@ -266,18 +330,92 @@ type State = {
    * until the user approves it; off, it spawns as soon as it decides to.
    */
   planning: boolean
+  /**
+   * Whether a new agent gets its own checkout of the repository.
+   *
+   * Off by default: a canvas with one agent on it has nothing to isolate from,
+   * and a worktree it did not ask for is a directory to explain. On, every
+   * agent spawned from here works alone — which is the only way a squad's
+   * diffs stay attributable.
+   */
+  isolateSpawns: boolean
   togglePlanning: () => void
-  /** The plan waiting on the user, if there is one. */
-  plan: Plan | null
-  editPlanStep: (stepId: string, task: string) => void
+  /** Turn worktree-per-agent on or off for agents spawned from now on. */
+  setIsolateSpawns: (on: boolean) => void
+  /**
+   * The command that decides whether this canvas's work is any good.
+   *
+   * The project's own — `bun run test`, `cargo test`, `make check` — run in
+   * the agent's working directory after it writes something. Empty means no
+   * verification, which is where every canvas starts and what every canvas did
+   * before this existed.
+   */
+  checkCommand: string
+  setCheckCommand: (command: string) => void
+  /**
+   * Operations this canvas refuses to let an agent take unasked.
+   *
+   * Ids from `guard_rules` — `push`, `discard`, `rewrite`. Enforced by a shim
+   * on the agent's PATH rather than by asking the provider nicely: see
+   * `guard.rs`. Empty is the default and means nothing is held back.
+   */
+  guards: string[]
+  setGuards: (guards: string[]) => void
+  /**
+   * Run the check against one agent's work now.
+   *
+   * Manual and automatic land here, so a verdict means the same thing however
+   * it was asked for.
+   */
+  runCheckFor: (nodeId: string) => Promise<void>
+  /**
+   * Recycle an agent's context window into a handover note on the canvas.
+   *
+   * Asks the agent to write the note, saves it, puts it on the canvas wired to
+   * the agent, then drops the provider session so the next turn starts in a
+   * fresh window carrying only that note. Returns an error string when the
+   * note could not be written — nothing is dropped in that case, because a
+   * window emptied without a note is the failure this exists to prevent.
+   */
+  compact: (nodeId: string) => Promise<{ error: string } | null>
+  /**
+   * The plans waiting on the user, oldest first.
+   *
+   * More than one because an orchestrator can be fixing two things at once,
+   * and the second fix is not the tail of the first. They are held flat rather
+   * than grouped by agent because that is how they are drawn, saved and
+   * cleared — the orchestrator each belongs to is on the plan itself.
+   */
+  plans: Plan[]
+  /**
+   * Put a step of your own into one plan, before the step now at `at`.
+   *
+   * A plan is a proposal, and a proposal you cannot amend is a yes/no question
+   * wearing a list's clothes — the review step you want before the implementer
+   * had no way in except asking the orchestrator to write the plan again.
+   * Returns the new step's id, or null when the plan is already at its limit.
+   */
+  addPlanStep: (planId: string, at: number) => string | null
+  /** Say what a step is. Both fields start empty on a step you added. */
+  editPlanStep: (stepId: string, patch: { persona?: string; task?: string }) => void
   removePlanStep: (stepId: string) => void
-  discardPlan: () => void
+  discardPlan: (planId: string) => void
   /** Run one step now. Resolves when the agent it spawns has finished. */
   approvePlanStep: (stepId: string) => Promise<void>
-  /** Run every step still pending, in order. */
-  approvePlan: () => Promise<void>
+  /** Run every step of one plan that is still pending, in order. */
+  approvePlan: (planId: string) => Promise<void>
   updateSkill: (nodeId: string, patch: Partial<SkillNodeData>) => void
   removeNode: (id: string) => void
+  /**
+   * Empty this canvas without leaving it.
+   *
+   * Folders stay: they are the directories the canvas is about rather than
+   * work done on it, and clearing to start again means starting again *here*.
+   * Everything else goes through `removeNode`, so a cleared session drops its
+   * pasted images and a cleared terminal closes its shell — the same teardown
+   * deleting one by hand has always done.
+   */
+  clearCanvas: () => void
   renameSession: (nodeId: string, name: string) => void
   setPermission: (nodeId: string, permission: Permission) => void
   setModel: (nodeId: string, model?: string) => void
@@ -287,6 +425,10 @@ type State = {
   setInstructions: (nodeId: string, instructions: string) => void
   setRightTab: (t: RightTab) => void
   setChatTarget: (nodeId: string | null) => void
+  /** Ask the chatbox to start a message with this text. */
+  setComposerDraft: (text: string) => void
+  /** Called by the composer once it has taken the seed. */
+  clearComposerSeed: () => void
 
   setCanvasDialog: (d: CanvasDialog | null) => void
   setGlobalRules: (rules: string) => void
@@ -354,7 +496,12 @@ export function folderRootsFor(
   const roots = edges
     .filter((e) => e.target === sessionNodeId && (e.type === 'cwd' || e.type === 'attach'))
     .map((e) => ({ edge: e, node: nodes.find((n) => n.id === e.source) }))
-    .filter((x): x is { edge: Edge; node: GtNode & { type: 'folder' } } => !!x.node && isFolder(x.node))
+    // A draft worktree is a name being typed, not a directory: wiring one in
+    // must not hand an agent an empty path to run in.
+    .filter(
+      (x): x is { edge: Edge; node: GtNode & { type: 'folder' } } =>
+        !!x.node && isFolder(x.node) && !x.node.data.draft,
+    )
     .map(({ edge, node }) => ({
       nodeId: node.id,
       path: node.data.path,
@@ -951,7 +1098,29 @@ const MODEL_GUIDE = (Object.keys(MODEL_OPTIONS) as Provider[])
 const EXAMPLE_CLAUDE_MODEL =
   MODEL_OPTIONS.claude.find((m) => m.id === 'claude-opus-5')?.id ?? MODEL_OPTIONS.claude[0].id
 
-export const useStore = create<State>((set, get) => ({
+/**
+ * Named ahead of the factory rather than inferred from it: the runtime helpers
+ * take one of these, and the factory calls them, so an inferred type would
+ * chase its own tail.
+ */
+export type CanvasStore = StoreApi<State>
+
+/**
+ * One canvas, one store.
+ *
+ * The store used to *be* the open canvas: opening another one emptied this
+ * object and filled it from the file, which is why switching lost whatever a
+ * running agent said while you were gone — its reply arrived for a node the
+ * store no longer had. Canvases are desks, not documents; you leave a job
+ * running on one and go and work on another.
+ *
+ * So each open canvas gets an instance of this, and everything that acts on a
+ * canvas is handed the instance that owns it rather than reaching for "the"
+ * store. An agent's events land on the canvas its node lives on whether or not
+ * that canvas is the one on screen, which is the whole point.
+ */
+export const createCanvasStore = (): CanvasStore =>
+  createStore<State>((set, get, api) => ({
   nodes: [],
   edges: [],
   providers: [],
@@ -974,12 +1143,16 @@ export const useStore = create<State>((set, get) => ({
   rightTab: 'canvases',
   panels: { ...DEFAULT_PANELS },
   chatTarget: null,
+  composerSeed: null,
   orchestra: { ...DEFAULT_ORCHESTRA },
   autoTidy: true,
   // On by default. An orchestrator that spawns the moment it has an idea is
   // the behaviour this exists to make optional, not the one to default to.
   planning: true,
-  plan: null,
+  isolateSpawns: false,
+  checkCommand: '',
+  guards: [],
+  plans: [],
   autoPlaced: new Set<string>(),
   notifications: [],
   queued: {},
@@ -1070,6 +1243,10 @@ export const useStore = create<State>((set, get) => ({
 
   addSession: (provider, pos) => {
     const id = `node_${uid()}`
+    // Deferred to a microtask, because callers rename the agent in the same
+    // tick they create it — spawnChild does — and a branch named for the
+    // placeholder would outlive the placeholder.
+    queueMicrotask(() => void autoIsolate(api, id))
     const sessionId = `sess_${uid()}`
     const existing = get().nodes.filter(isSession).length
     const role = existing === 0 ? 'orchestrator' : 'worker'
@@ -1100,7 +1277,7 @@ export const useStore = create<State>((set, get) => ({
       },
     }
     set((s) => ({ nodes: [...s.nodes, node], selectedId: id }))
-    logPulse(
+    logPulse(api, 
       id,
       'spawned',
       role === 'orchestrator'
@@ -1128,15 +1305,16 @@ export const useStore = create<State>((set, get) => ({
     return id
   },
 
-  addFolder: (path, pos) => {
+  addFolder: (path, pos, seed) => {
     const id = `node_${uid()}`
     set((s) => ({
       nodes: [
         ...s.nodes,
-        { id, type: 'folder', position: pos, data: { folderId: `dir_${uid()}`, path } },
+        { id, type: 'folder', position: pos, data: { folderId: `dir_${uid()}`, path, ...seed } },
       ],
       selectedId: id,
     }))
+    if (seed?.draft) return id
     // Verify lazily so a stale folder shows as missing instead of failing a spawn.
     void dirExists(path).then((ok) =>
       set((s) => ({
@@ -1148,7 +1326,73 @@ export const useStore = create<State>((set, get) => ({
     return id
   },
 
-  attachFolder: (sessionNodeId, path) => {
+  addWorktree: (pos) => {
+    const st = get()
+    // The repository to cut from: whatever this canvas is already working in.
+    // A worktree of nothing is not a thing you can place, so this refuses
+    // rather than opening a picker the gesture did not ask for.
+    const fromNode = st.nodes.find(
+      (n): n is GtNode & { type: 'folder' } => isFolder(n) && !n.data.draft && !n.data.missing,
+    )
+    const repo = fromNode?.data.path ?? st.cwd
+    if (!repo) return null
+    return get().addFolder('', pos, { draft: true, worktree: { branch: '', repo } })
+  },
+
+  createWorktree: async (nodeId, name) => {
+    const node = get().nodes.find((n) => n.id === nodeId)
+    if (!node || !isFolder(node) || !node.data.worktree) return { error: 'that node is gone' }
+    if (!name.trim()) return { error: 'give the branch a name' }
+
+    let wt: Awaited<ReturnType<typeof worktreeAdd>>
+    try {
+      wt = await worktreeAdd(node.data.worktree.repo, name)
+    } catch (e) {
+      return { error: String(e) }
+    }
+
+    // The draft becomes the checkout it was standing in for, in place: the
+    // node keeps its position and any edges already drawn to it.
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === nodeId && isFolder(n)
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                path: wt.path,
+                draft: false,
+                missing: false,
+                worktree: { branch: wt.branch, repo: wt.repo },
+              },
+            }
+          : n,
+      ) as GtNode[],
+    }))
+    return null
+  },
+
+  removeWorktree: async (nodeId) => {
+    const node = get().nodes.find((n) => n.id === nodeId)
+    if (!node || !isFolder(node)) return { error: 'that node is gone' }
+
+    // A draft never made it to disk; deleting the node is the whole job.
+    if (node.data.draft || !node.data.worktree) {
+      get().removeNode(nodeId)
+      return null
+    }
+    try {
+      await worktreeRemove(node.data.path)
+    } catch (e) {
+      // git refuses while there is uncommitted work, and says what is unsaved.
+      // That refusal is the point: this is where an agent's last hour lives.
+      return { error: String(e) }
+    }
+    get().removeNode(nodeId)
+    return null
+  },
+
+  attachFolder: (sessionNodeId, path, seed) => {
     const st = get()
     const session = st.nodes.find((n) => n.id === sessionNodeId)
     if (!session || !isSession(session)) return null
@@ -1176,6 +1420,7 @@ export const useStore = create<State>((set, get) => ({
           },
           st.nodes.map(boxOf),
         ),
+        seed,
       )
 
     // Same first-wins rule as wiring the edge by hand.
@@ -1225,6 +1470,50 @@ export const useStore = create<State>((set, get) => ({
         }),
       }
     }),
+
+  isolateSession: async (sessionNodeId) => {
+    const st = get()
+    const session = st.nodes.find((n) => n.id === sessionNodeId)
+    if (!session || !isSession(session)) return { error: 'that agent is gone' }
+
+    const roots = folderRootsFor(st.nodes, st.edges, sessionNodeId)
+    const from = roots.find((r) => r.primary)?.path ?? session.data.cwd
+    if (!from) return { error: 'wire a folder in first — there is no repository to branch from' }
+
+    let wt: Awaited<ReturnType<typeof worktreeAdd>>
+    try {
+      wt = await worktreeAdd(from, session.data.name)
+    } catch (e) {
+      // git's own message names what went wrong, and is better than anything
+      // this layer could write in its place.
+      return { error: String(e) }
+    }
+
+    // The checkout is a real directory, so it becomes a real node: attaching it
+    // is what puts it on the canvas, and promoting it is what makes the agent
+    // work there. A worktree the canvas cannot see would be the one thing this
+    // feature exists to prevent.
+    const folderId = get().attachFolder(sessionNodeId, wt.path, {
+      worktree: { branch: wt.branch, repo: wt.repo },
+    })
+    const existing = get().nodes.find((n) => isFolder(n) && samePath(n.data.path, wt.path))
+    const id = folderId ?? existing?.id
+    if (id) get().setPrimaryFolder(sessionNodeId, id)
+    // A checkout reached this way and one placed by hand are the same thing on
+    // disk, so they are the same node on the canvas: an existing folder node
+    // for this path learns what it is.
+    if (existing) {
+      set((s) => ({
+        nodes: s.nodes.map((n) =>
+          n.id === existing.id && isFolder(n)
+            ? { ...n, data: { ...n.data, worktree: { branch: wt.branch, repo: wt.repo } } }
+            : n,
+        ) as GtNode[],
+      }))
+    }
+
+    return { branch: wt.branch }
+  },
 
   addFile: (path, pos, origin = 'user') => {
     const existing = get().nodes.find((n) => isFile(n) && n.data.path === path)
@@ -1276,53 +1565,222 @@ export const useStore = create<State>((set, get) => ({
   toggleAutoTidy: () => set((s) => ({ autoTidy: !s.autoTidy })),
 
   togglePlanning: () => set((s) => ({ planning: !s.planning })),
+  setIsolateSpawns: (isolateSpawns) => set({ isolateSpawns }),
+  setCheckCommand: (checkCommand) => set({ checkCommand }),
+  setGuards: (guards) => set({ guards }),
 
-  editPlanStep: (stepId, task) =>
-    set((s) =>
-      s.plan
-        ? {
-            plan: {
-              ...s.plan,
-              steps: s.plan.steps.map((st) => (st.id === stepId ? { ...st, task } : st)),
-            },
-          }
-        : s,
-    ),
+  compact: async (nodeId) => {
+    const st = get()
+    const node = st.nodes.find((n) => n.id === nodeId)
+    if (!node || !isSession(node)) return { error: 'that agent is gone' }
+    if (node.data.state === 'thinking' || node.data.state === 'streaming') {
+      return { error: 'wait for the turn to finish first' }
+    }
 
-  removePlanStep: (stepId) =>
-    set((s) => {
-      if (!s.plan) return s
-      const steps = s.plan.steps.filter((st) => st.id !== stepId)
-      // A plan with every step struck out is a discarded plan.
-      return { plan: steps.length ? { ...s.plan, steps } : null }
-    }),
+    const before = node.data.messages.length
+    // The agent writes its own note: nothing else has read the conversation,
+    // and a summary written from the outside would be a summary of the
+    // transcript rather than of the work.
+    await get().send(nodeId, COMPACT_PROMPT)
 
-  discardPlan: () => set({ plan: null }),
+    const after = get().nodes.find((n) => n.id === nodeId)
+    if (!after || !isSession(after)) return { error: 'that agent is gone' }
+    const summary = lastSaid(after.data.messages.slice(before))
+    if (!summary.trim()) return { error: 'the agent wrote no handover note' }
 
-  approvePlanStep: async (stepId) => {
-    const plan = get().plan
-    const step = plan?.steps.find((x) => x.id === stepId)
-    if (!plan || !step || step.state !== 'pending') return
-    await runPlanStep(plan.fromNodeId, stepId)
+    const at = Date.now()
+    const cwd = resolveCwd(get().nodes, get().edges, nodeId) ?? after.data.cwd
+    let path: string
+    try {
+      path = await writeNote(noteName(after.data.name, at), noteFile(after.data.name, at, cwd, summary))
+    } catch (e) {
+      return { error: String(e) }
+    }
+
+    // On the canvas before the window is dropped, and wired to the agent that
+    // wrote it: a note nobody can find is the invisible truncation this was
+    // built to replace.
+    const fileId = get().addFile(path, findFreeSpot(
+      { x: after.position.x - 300, y: after.position.y + 140, w: 240, h: 68 },
+      get().nodes.map(boxOf),
+    ))
+    set((s) => ({
+      edges: [...s.edges, { id: `file_${uid()}`, source: fileId, target: nodeId, type: 'file' }],
+    }))
+
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === nodeId && isSession(n)
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                // The next turn opens a new provider session, which is what
+                // actually empties the window.
+                providerSessionId: undefined,
+                carry: summary,
+                compactions: (n.data.compactions ?? 0) + 1,
+                // Everything a fresh session has to be told again, because it
+                // will not be the session that was told the first time.
+                sentInstructions: undefined,
+                sentFolders: undefined,
+                sentRoster: undefined,
+                sentPeers: undefined,
+                sentFilesKnown: undefined,
+                sentFiles: {},
+                sentOrchestrator: undefined,
+                // The meter describes a conversation that no longer exists.
+                contextTokens: undefined,
+                messages: [
+                  {
+                    id: uid(),
+                    role: 'system' as const,
+                    text: `Context window recycled. The handover note is on the canvas, and rides on the next turn.`,
+                    tools: [],
+                  },
+                ],
+              },
+            }
+          : n,
+      ) as GtNode[],
+    }))
+
+    logPulse(api, nodeId, 'compact', `window recycled into a handover note`)
+    return null
   },
 
-  approvePlan: async () => {
+  runCheckFor: async (nodeId) => {
+    const st = get()
+    const command = st.checkCommand.trim()
+    const node = st.nodes.find((n) => n.id === nodeId)
+    if (!command || !node || !isSession(node)) return
+    // Already running: a second suite in the same directory as the first is
+    // two runs fighting over the same build artefacts, and the answer to
+    // "what does the check say" is the one already on its way.
+    if (node.data.check?.state === 'running') return
+
+    // The directory it actually works in, which after isolation is its own
+    // checkout — the whole point of checking per agent rather than per canvas.
+    const cwd = folderRootsFor(st.nodes, st.edges, nodeId).find((r) => r.primary)?.path ?? node.data.cwd
+    if (!cwd) return
+
+    const patch = (check: SessionNodeData['check'], unchecked?: boolean) =>
+      useStore.setState((s) => ({
+        nodes: s.nodes.map((n) =>
+          n.id === nodeId && n.type === 'session'
+            ? { ...n, data: { ...n.data, check, ...(unchecked === undefined ? {} : { unchecked }) } }
+            : n,
+        ) as GtNode[],
+      }))
+
+    patch({ state: 'running', at: Date.now() })
+    const out = await runCheck(cwd, command).catch((e: unknown) => ({
+      ok: false,
+      code: null,
+      ms: 0,
+      tail: '',
+      error: String(e),
+    }))
+
+    patch(
+      {
+        state: out.ok ? 'pass' : 'fail',
+        at: Date.now(),
+        ms: out.ms,
+        code: out.code,
+        tail: out.tail || undefined,
+        error: out.error ?? undefined,
+      },
+      // Checked, whatever it said. A failing check is still an answer about
+      // the work as it stands; re-running it unprompted would loop.
+      false,
+    )
+
+    // The feed says it plainly, so a squad's verdicts arrive in one place
+    // rather than on four nodes you have to go and look at.
+    const seconds = out.ms >= 1000 ? ` in ${(out.ms / 1000).toFixed(1)}s` : ''
+    logPulse(api, 
+      nodeId,
+      'check',
+      out.error
+        ? `checks could not run — ${out.error}`
+        : out.ok
+          ? `checks pass${seconds}`
+          : `checks fail${out.code == null ? '' : ` (exit ${out.code})`}${seconds}`,
+    )
+  },
+
+  addPlanStep: (planId, at) => {
+    const plan = get().plans.find((p) => p.id === planId)
+    if (!plan) return null
+    const id = `step_${uid()}`
+    const next = insertStep(plan, at, id)
+    if (!next) return null
+    set((s) => ({ plans: withPlan(s.plans, planId, () => next) }))
+    return id
+  },
+
+  // Keyed by the step rather than the plan: step ids are unique across every
+  // plan on the canvas, and the node doing the editing has one in its hand.
+  editPlanStep: (stepId, patch) =>
+    set((s) => ({
+      plans: s.plans.map((p) =>
+        p.steps.some((st) => st.id === stepId)
+          ? { ...p, steps: p.steps.map((st) => (st.id === stepId ? { ...st, ...patch } : st)) }
+          : p,
+      ),
+    })),
+
+  // A plan with every step struck out is a discarded plan — `withPlan` drops
+  // an emptied one rather than leaving a headline with nothing under it.
+  removePlanStep: (stepId) =>
+    set((s) => {
+      const held = findStep(s.plans, stepId)
+      return held
+        ? {
+            plans: withPlan(s.plans, held.plan.id, (p) => ({
+              ...p,
+              steps: p.steps.filter((st) => st.id !== stepId),
+            })),
+          }
+        : s
+    }),
+
+  discardPlan: (planId) => set((s) => ({ plans: s.plans.filter((p) => p.id !== planId) })),
+
+  approvePlanStep: async (stepId) => {
+    const held = findStep(get().plans, stepId)
+    if (!held || held.step.state !== 'pending') return
+    // A step you added and have not filled in yet. The node's own button is
+    // disabled, but nothing else may spawn a nameless agent either.
+    if (!stepReady(held.step)) return
+    await runPlanStep(api, held.plan.fromNodeId, stepId)
+  },
+
+  approvePlan: async (planId) => {
     // A fan-out is the one shape where the steps do not read each other, which
     // is the only thing that makes running them at once safe — and it is the
     // orchestrator that said so, in the PATTERN line, before the user approved
     // the plan it was written under.
-    const plan0 = get().plan
-    if (plan0 && fansOut(plan0.pattern?.id) && !plan0.warning) return runPlanFanout(plan0.fromNodeId)
+    const plan0 = get().plans.find((p) => p.id === planId)
+    if (!plan0) return
+    if (fansOut(plan0.pattern?.id) && !plan0.warning) return runPlanFanout(api, planId)
 
     // Otherwise one at a time, in order. The steps of a plan are a sequence —
     // a reviewer reads what the implementer wrote — and running them at once
     // would hand every one of them the state from before any of them ran.
+    //
+    // Only this plan's steps: another plan on the same orchestrator is another
+    // job, and approving one is not approving the other.
     for (;;) {
-      const plan = get().plan
+      const plan = get().plans.find((p) => p.id === planId)
       if (!plan) return
       const step = nextStep(plan.steps)
       if (!step) return
-      await runPlanStep(plan.fromNodeId, step.id)
+      // Stop at a step you have not finished writing rather than failing it:
+      // the run is waiting on you, and the card says so.
+      if (!stepReady(step)) return
+      await runPlanStep(api, plan.fromNodeId, step.id)
     }
   },
 
@@ -1336,7 +1794,7 @@ export const useStore = create<State>((set, get) => ({
 
   tidy: (all = false) =>
     set((s) => {
-      const placed = layoutCanvas(s.nodes, s.edges, all ? undefined : s.autoPlaced, s.plan)
+      const placed = layoutCanvas(s.nodes, s.edges, all ? undefined : s.autoPlaced, s.plans)
       return {
         nodes: s.nodes.map((n) =>
           placed[n.id] ? { ...n, position: placed[n.id] } : n,
@@ -1425,14 +1883,42 @@ export const useStore = create<State>((set, get) => ({
 
   showPanel: (key) => set((s) => ({ panels: { ...s.panels, [key]: { open: true, minimized: false } } })),
 
-  addLanding: (pos) => {
-    const existing = get().nodes.find((n) => n.type === 'landing')
+  postNote: (body) => {
+    const text = body.trim()
+    if (!text) return
+    set((s) => ({
+      bus: [
+        ...s.bus,
+        {
+          id: uid(),
+          // Not an agent, so no agent is excluded as its author: a note from
+          // you is owed to every one of them.
+          sessionId: 'user',
+          sessionName: 'you',
+          kind: 'user' as const,
+          body: text.slice(0, 600),
+          ts: Date.now(),
+        },
+      ],
+    }))
+  },
+
+  removeNote: (id) =>
+    set((s) => ({
+      // Watermarks are left alone on purpose. An agent that has already been
+      // given this cannot un-read it, and clearing the record would send it
+      // again the next time the board is read.
+      bus: s.bus.filter((e) => e.id !== id),
+    })),
+
+  addChanges: (pos) => {
+    const existing = get().nodes.find((n) => n.type === 'changes')
     if (existing) return existing.id
     const id = `node_${uid()}`
     set((s) => ({
       nodes: [
         ...s.nodes,
-        { id, type: 'landing', position: pos, data: { landingId: `landing_${uid()}` } } as GtNode,
+        { id, type: 'changes', position: pos, data: { changesId: `changes_${uid()}` } } as GtNode,
       ],
     }))
     return id
@@ -1520,6 +2006,29 @@ export const useStore = create<State>((set, get) => ({
     }))
   },
 
+  clearCanvas: () => {
+    // One at a time rather than a single filter, so each node gets the
+    // teardown it would get if the user had deleted it: session images
+    // dropped, terminal shells closed, folder heirs promoted.
+    for (const n of get().nodes.filter((n) => n.type !== 'folder')) get().removeNode(n.id)
+
+    set((s) => {
+      const kept = new Set(s.nodes.map((n) => n.id))
+      return {
+        // All of these hang off nodes that have just gone: messages waiting
+        // for an agent, what each agent has already been handed, and plans
+        // whose steps belong to orchestrators no longer on the board.
+        bus: [],
+        delivered: {},
+        plans: [],
+        selectedId: null,
+        chatTarget: null,
+        openFilePath: null,
+        autoPlaced: new Set([...s.autoPlaced].filter((id) => kept.has(id))),
+      }
+    })
+  },
+
   renameSession: (nodeId, name) =>
     set((s) => ({
       nodes: s.nodes.map((n) =>
@@ -1533,6 +2042,8 @@ export const useStore = create<State>((set, get) => ({
 
   setRightTab: (rightTab) => set({ rightTab, libraryOpen: true }),
   setChatTarget: (chatTarget) => set({ chatTarget }),
+  setComposerDraft: (composerSeed) => set({ composerSeed }),
+  clearComposerSeed: () => set({ composerSeed: null }),
   setOrchestra: (patch) => set((s) => ({ orchestra: { ...s.orchestra, ...patch } })),
 
   setModel: (nodeId, model) =>
@@ -1656,14 +2167,10 @@ export const useStore = create<State>((set, get) => ({
       .filter((sk) => d.skillIds.includes(sk.data.skillId))
       .filter((sk) => sk.data.trigger === 'always' || !d.providerSessionId)
 
-    // 2. Context reachable over inbound context edges, minus what we've sent.
-    const inbound = s.edges
-      .filter((e) => e.target === nodeId && e.type === 'context')
-      .map((e) => s.nodes.find((n) => n.id === e.source))
-      .filter((n): n is GtNode & { type: 'session' } => !!n && isSession(n))
-    const sourceIds = new Set(inbound.map((n) => n.data.sessionId))
+    // 2. The shared board: everything this agent has not been given yet, from
+    // every agent on the canvas, wired to it or not. See `sharedcontext.ts`.
     const already = s.delivered[d.sessionId] ?? new Set<string>()
-    const fresh = s.bus.filter((e) => sourceIds.has(e.sessionId) && !already.has(e.id))
+    const fresh = freshFor(s.bus, already, d.sessionId)
 
     // 3. Peers this agent may delegate to (POC stand-in for the MCP ask_agent tool).
     const peers = s.nodes
@@ -1761,6 +2268,13 @@ export const useStore = create<State>((set, get) => ({
     // arrives. Every agent, not just orchestrators — they all now receive a
     // setup that does not repeat itself.
     if (!d.providerSessionId) parts.push(standingBlock())
+    // The handover note from the window this session replaced. Only ever on
+    // the opening turn: it is a handover, not a standing instruction, and
+    // repeating it would refill the window it was written to empty.
+    if (!d.providerSessionId && d.carry) {
+      const carry = carryBlock(d.carry)
+      if (carry) parts.push(carry)
+    }
     // This agent's standing brief, when it is new or has been edited since.
     const brief = (d.instructions ?? '').trim()
     const briefChanged = brief !== (d.sentInstructions ?? '').trim()
@@ -1881,7 +2395,7 @@ export const useStore = create<State>((set, get) => ({
 
     // What you asked for, in the feed alongside what came back. Without it the
     // Pulse reads as a list of answers to questions nobody can see.
-    logPulse(nodeId, 'prompt', headlineOf(text))
+    logPulse(api, nodeId, 'prompt', headlineOf(text))
 
     set((st) => ({
       nodes: st.nodes.map((n) =>
@@ -1895,6 +2409,10 @@ export const useStore = create<State>((set, get) => ({
                 awaitingUser: false,
                 ...(briefChanged ? { sentInstructions: brief } : {}),
                 ...(foldersChanged ? { sentFolders: folderKey } : {}),
+                // The handover has been handed over. Kept on the node until
+                // the turn that carries it actually goes out, so a send that
+                // failed leaves the note still waiting.
+                ...(!d.providerSessionId && d.carry ? { carry: undefined } : {}),
                 // Watermarks for everything that now goes only on change.
                 // Recorded together with the turn that carried them, so a
                 // send that never happened can't mark anything as delivered.
@@ -1933,6 +2451,9 @@ export const useStore = create<State>((set, get) => ({
         permission: d.permission,
         mcpServers: mcpFor(s.nodes, s.edges, nodeId),
         images,
+        // Read per turn, so a rule turned on between turns takes effect on the
+        // next one rather than on the next agent.
+        guards: s.guards,
       })
     } catch (err) {
       get().applyEvent(d.sessionId, { kind: 'failed', message: String(err) })
@@ -2042,6 +2563,13 @@ export const useStore = create<State>((set, get) => ({
         patchPending((m) => ({ ...m, text: m.text + ev.text }))
         break
 
+      // Replaced, never accumulated: this is how big the conversation *is*,
+      // and it arrives once per API call while a turn runs, so a long tool
+      // loop shows the window filling as it happens rather than at the end.
+      case 'context':
+        patchNode((d) => ({ ...d, contextTokens: ev.tokens }))
+        break
+
       case 'toolCall':
         patchPending((m) => ({
           ...m,
@@ -2055,13 +2583,17 @@ export const useStore = create<State>((set, get) => ({
         // it reached for, and the specific tool it used.
         {
           const mcp = parseMcpTool(ev.name)
-          if (mcp) void recordMcpUse(nodeId, mcp.server, mcp.tool)
+          if (mcp) void recordMcpUse(api, nodeId, mcp.server, mcp.tool)
         }
         // Every file the agent touches becomes a node wired back to it, so the
         // canvas ends up showing what each agent actually worked on.
         for (const t of ev.paths) {
-          void spawnTouchedFile(nodeId, absolute(t.path, node.data.cwd), t.write)
+          void spawnTouchedFile(api, nodeId, absolute(t.path, node.data.cwd), t.write)
         }
+        // A write is what makes the last verdict stale. Reads change nothing a
+        // check would say, and re-running a suite to learn that is minutes of
+        // nothing.
+        if (ev.paths.some((t) => t.write)) patchNode((d) => ({ ...d, unchecked: true }))
         break
 
       case 'result': {
@@ -2081,6 +2613,16 @@ export const useStore = create<State>((set, get) => ({
           // blanking the meter mid-run.
           ...(ev.contextTokens != null ? { contextTokens: ev.contextTokens } : {}),
         }))
+        // The turn is over and it wrote something: ask the project whether the
+        // work is any good, rather than taking the agent's word for it. Fired
+        // rather than awaited — the verdict arrives on the node when it
+        // arrives, and nothing else should wait on a test suite.
+        {
+          const after = useStore.getState().nodes.find((n) => n.id === nodeId)
+          if (after && isSession(after) && after.data.unchecked) {
+            void useStore.getState().runCheckFor(nodeId)
+          }
+        }
         break
       }
 
@@ -2155,10 +2697,10 @@ export const useStore = create<State>((set, get) => ({
           set((s) => ({ bus: [...s.bus, entry] }))
           // …and into the bell, so a turn that finished while you were looking
           // somewhere else is still there when you come back.
-          notifyTurn(nodeId, last, looksLikeQuestion(last.text))
+          notifyTurn(api, nodeId, last, looksLikeQuestion(last.text))
           // Definitions first: a reply can invent a persona and spawn it in
           // the same breath, and the spawn resolves against the library.
-          void maybeDefinePersonas(last.text).then(() => {
+          void maybeDefinePersonas(api, last.text).then(() => {
             // With planning on, what an orchestrator wrote is a proposal. The
             // gate is here rather than in the prompt, so an agent that reaches
             // for a protocol out of habit still can't start work on its own —
@@ -2170,10 +2712,10 @@ export const useStore = create<State>((set, get) => ({
             const gated =
               st.planning && !!author && isSession(author) && author.data.role === 'orchestrator'
             if (gated) {
-              proposePlan(nodeId, last.text)
+              proposePlan(api, nodeId, last.text)
             } else {
-              void maybeDelegate(nodeId, last.text)
-              void maybeSpawn(nodeId, last.text)
+              void maybeDelegate(api, nodeId, last.text)
+              void maybeSpawn(api, nodeId, last.text)
             }
           })
         }
@@ -2181,7 +2723,101 @@ export const useStore = create<State>((set, get) => ({
       }
     }
   },
-}))
+  }))
+
+
+/**
+ * The canvas on screen.
+ *
+ * Kept here rather than in the strip that owns the ordering, so that nothing
+ * below this line has to import upward: `desk.ts` decides which canvas is in
+ * view and says so, and everything that just wants "wherever the user is
+ * looking" reads it from here.
+ */
+let active: CanvasStore = createCanvasStore()
+const watchers = new Set<() => void>()
+
+export const activeStore = () => active
+
+export function setActiveStore(next: CanvasStore) {
+  if (next === active) return
+  active = next
+  for (const fn of watchers) fn()
+}
+
+function watchActive(fn: () => void) {
+  watchers.add(fn)
+  return () => {
+    watchers.delete(fn)
+  }
+}
+
+/**
+ * Which store a component reads.
+ *
+ * A canvas surface wraps itself in `CanvasStoreContext`, so every node, panel
+ * and button inside it talks to its own canvas — several are mounted side by
+ * side in the strip, and a node on the canvas two along must not answer for
+ * the one you are looking at. Anything rendered outside a surface — the app
+ * bar, the command palette — gets the canvas in view, which is what "the
+ * canvas" means from out there.
+ */
+export const CanvasStoreContext = createContext<CanvasStore | null>(null)
+
+/**
+ * Read a field off a named canvas, whichever one it is.
+ *
+ * For the few things that look *across* the desk — the dots that say which
+ * canvas is busy — rather than at the canvas they are inside.
+ */
+export function useCanvasStore<T>(store: CanvasStore, selector: (s: State) => T): T {
+  return useZustandStore(store, selector)
+}
+
+/**
+ * Whether this is the canvas in view.
+ *
+ * Every canvas on the desk stays mounted — that is what keeps its agents
+ * running — which means every one of them also mounts the chrome around it,
+ * and the window-level shortcut listeners that chrome installs. One press of
+ * ⌘B was being handled once per open canvas: two canvases toggled the sidebar
+ * twice and it appeared not to work at all. The keyboard belongs to whichever
+ * canvas you are looking at, so the ones behind it hold their peace.
+ *
+ * True outside any surface too, for chrome that belongs to the desk itself.
+ */
+export function useInView(): boolean {
+  const mine = useContext(CanvasStoreContext)
+  const inView = useSyncExternalStore(watchActive, activeStore, activeStore)
+  return !mine || mine === inView
+}
+
+/**
+ * The same answer as `useInView`, as a ref — so a listener registered once can
+ * check it on every press without being torn down and rebuilt each time the
+ * view moves.
+ */
+export function useInViewRef() {
+  const showing = useInView()
+  const ref = useRef(showing)
+  ref.current = showing
+  return ref
+}
+
+export function useStore<T>(selector: (s: State) => T): T {
+  const bound = useContext(CanvasStoreContext)
+  const inView = useSyncExternalStore(watchActive, activeStore, activeStore)
+  return useZustandStore(bound ?? inView, selector)
+}
+
+// The bound-store shorthands zustand used to provide, aimed at the canvas in
+// view. Every runtime path that acts on a *particular* canvas takes its store
+// as an argument instead — see `spawnChild` and the helpers below it.
+useStore.getState = () => active.getState()
+useStore.setState = ((partial: Parameters<CanvasStore['setState']>[0]) =>
+  active.setState(partial)) as CanvasStore['setState']
+useStore.subscribe = ((listener: Parameters<CanvasStore['subscribe']>[0]) =>
+  active.subscribe(listener)) as CanvasStore['subscribe']
 
 /**
  * POC stand-in for the MCP `ask_agent` tool: if an orchestrator's reply
@@ -2193,7 +2829,7 @@ export const useStore = create<State>((set, get) => ({
  * Materialise a file the agent just read or wrote, and connect it to that
  * agent. Placed in a column beside the session so it doesn't land on top of it.
  */
-async function spawnTouchedFile(sessionNodeId: string, path: string, write: boolean) {
+async function spawnTouchedFile(api: CanvasStore, sessionNodeId: string, path: string, write: boolean) {
   // Paths pulled out of a shell command are guesses. Confirm the file is real
   // before it becomes a node — and give a write a moment to land, since the
   // tool call is reported before the command runs.
@@ -2202,19 +2838,19 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
     if (!(await fileExists(path))) return
   }
 
-  const st = useStore.getState()
+  const st = api.getState()
   const session = st.nodes.find((n) => n.id === sessionNodeId)
   if (!session) return
 
   // A write is the only file touch worth a line in the feed. Reads are how an
   // agent works; writes are what it changed, and are the thing you may want to
   // revert. The edge and the node still record both.
-  if (write) logPulse(sessionNodeId, 'wrote', path)
+  if (write) logPulse(api, sessionNodeId, 'wrote', path)
 
   const existing = st.nodes.find((n) => n.type === 'file' && n.data.path === path)
   if (existing) {
     // Already on canvas: just refresh its state and make sure it's connected.
-    useStore.setState((s) => ({
+    api.setState((s) => ({
       nodes: s.nodes.map((n) =>
         n.id === existing.id && n.type === 'file'
           ? { ...n, data: { ...n.data, written: n.data.written || write, touchedAt: Date.now() } }
@@ -2265,9 +2901,9 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
     st.nodes.filter((n) => n.id !== sessionNodeId).map(boxOf),
   )
 
-  const id = useStore.getState().addFile(path, pos, 'agent')
-  markAutoPlaced(id)
-  useStore.setState((s) => ({
+  const id = api.getState().addFile(path, pos, 'agent')
+  markAutoPlaced(api, id)
+  api.setState((s) => ({
     nodes: s.nodes.map((n) =>
       n.id === id && n.type === 'file' ? { ...n, data: { ...n.data, written: write } } : n,
     ) as GtNode[],
@@ -2311,15 +2947,14 @@ async function spawnTouchedFile(sessionNodeId: string, path: string, write: bool
  * here is one line the app writes about itself: what you asked for, what shape
  * was chosen, who got spawned, what got written.
  */
-function logPulse(
-  sessionNodeId: string,
+function logPulse(api: CanvasStore, sessionNodeId: string,
   kind: NotificationKind,
   headline: string,
   fallback?: { name: string; provider: Provider },
 ) {
   const text = headline.trim()
   if (!text) return
-  const session = useStore.getState().nodes.find((n) => n.id === sessionNodeId)
+  const session = api.getState().nodes.find((n) => n.id === sessionNodeId)
   const who =
     session && isSession(session)
       ? { name: session.data.name, provider: session.data.provider }
@@ -2342,13 +2977,13 @@ function logPulse(
     read: !isBellKind(kind),
   }
 
-  useStore.setState((s) => ({
+  api.setState((s) => ({
     notifications: [entry, ...s.notifications].slice(0, MAX_NOTIFICATIONS),
   }))
 }
 
-function notifyTurn(sessionNodeId: string, msg: Message, awaitingUser: boolean) {
-  const st = useStore.getState()
+function notifyTurn(api: CanvasStore, sessionNodeId: string, msg: Message, awaitingUser: boolean) {
+  const st = api.getState()
   const session = st.nodes.find((n) => n.id === sessionNodeId)
   if (!session || !isSession(session)) return
 
@@ -2371,7 +3006,7 @@ function notifyTurn(sessionNodeId: string, msg: Message, awaitingUser: boolean) 
   }
 
   // Newest first: the feed is read from the top, and the cap drops the stalest.
-  useStore.setState((s) => ({
+  api.setState((s) => ({
     notifications: [entry, ...s.notifications].slice(0, MAX_NOTIFICATIONS),
   }))
 }
@@ -2386,8 +3021,8 @@ const MAX_TOOL_NODES_PER_SERVER = 8
  * A server the agent reached for is part of what happened, whether or not the
  * user wired it in beforehand — the canvas is the record, so it has to say so.
  */
-async function recordMcpUse(sessionNodeId: string, server: string, tool: string) {
-  const st = useStore.getState()
+async function recordMcpUse(api: CanvasStore, sessionNodeId: string, server: string, tool: string) {
+  const st = api.getState()
   const session = st.nodes.find((n) => n.id === sessionNodeId)
   if (!session) return
 
@@ -2397,7 +3032,7 @@ async function recordMcpUse(sessionNodeId: string, server: string, tool: string)
     const reported = session.type === 'session'
       ? session.data.mcpServers?.find((m) => m.name === server)
       : undefined
-    const id = useStore.getState().addMcp(
+    const id = api.getState().addMcp(
       {
         name: server,
         transport: 'unknown',
@@ -2410,23 +3045,23 @@ async function recordMcpUse(sessionNodeId: string, server: string, tool: string)
           w: 240,
           h: 150,
         },
-        useStore.getState().nodes.map(boxOf),
+        api.getState().nodes.map(boxOf),
       ),
     )
-    markAutoPlaced(id)
+    markAutoPlaced(api, id)
     if (reported) {
-      useStore.setState((s) => ({
+      api.setState((s) => ({
         nodes: s.nodes.map((n) =>
           n.id === id && isMcp(n) ? { ...n, data: { ...n.data, status: reported.status } } : n,
         ) as GtNode[],
       }))
     }
-    serverNode = useStore.getState().nodes.find((n) => n.id === id)
+    serverNode = api.getState().nodes.find((n) => n.id === id)
   }
   if (!serverNode) return
 
   // Wire it to the agent that used it, if it isn't already.
-  useStore.setState((s) => ({
+  api.setState((s) => ({
     edges: s.edges.some((e) => e.source === serverNode!.id && e.target === sessionNodeId)
       ? s.edges
       : [
@@ -2440,7 +3075,7 @@ async function recordMcpUse(sessionNodeId: string, server: string, tool: string)
     .getState()
     .nodes.find((n) => isMcpTool(n) && n.data.server === server && n.data.tool === tool)
   if (existing) {
-    useStore.setState((s) => ({
+    api.setState((s) => ({
       nodes: s.nodes.map((n) =>
         n.id === existing.id && isMcpTool(n)
           ? { ...n, data: { ...n.data, calls: n.data.calls + 1, lastAt: Date.now() } }
@@ -2463,9 +3098,9 @@ async function recordMcpUse(sessionNodeId: string, server: string, tool: string)
       w: 200,
       h: 56,
     },
-    useStore.getState().nodes.map(boxOf),
+    api.getState().nodes.map(boxOf),
   )
-  useStore.setState((s) => ({
+  api.setState((s) => ({
     nodes: [
       ...s.nodes,
       {
@@ -2487,7 +3122,7 @@ async function recordMcpUse(sessionNodeId: string, server: string, tool: string)
       },
     ],
   }))
-  markAutoPlaced(id)
+  markAutoPlaced(api, id)
 }
 
 /**
@@ -2498,12 +3133,12 @@ async function recordMcpUse(sessionNodeId: string, server: string, tool: string)
  * start at all (no folder attached, say). The parent then never got its report
  * and simply stopped, with nothing in the transcript to say why.
  */
-function whenIdle(nodeId: string): Promise<void> {
+function whenIdle(api: CanvasStore, nodeId: string): Promise<void> {
   const busy = (s: ReturnType<typeof useStore.getState>) => {
     const n = s.nodes.find((x) => x.id === nodeId)
     return !!n && n.type === 'session' && (n.data.state === 'thinking' || n.data.state === 'streaming')
   }
-  if (!busy(useStore.getState())) return Promise.resolve()
+  if (!busy(api.getState())) return Promise.resolve()
   return new Promise((resolve) => {
     const stop = useStore.subscribe((s) => {
       if (!busy(s)) {
@@ -2515,8 +3150,8 @@ function whenIdle(nodeId: string): Promise<void> {
 }
 
 /** Hand a node to the layout. Only agent-created nodes are ever passed here. */
-function markAutoPlaced(id: string) {
-  useStore.setState((s) => ({ autoPlaced: new Set(s.autoPlaced).add(id) }))
+function markAutoPlaced(api: CanvasStore, id: string) {
+  api.setState((s) => ({ autoPlaced: new Set(s.autoPlaced).add(id) }))
 }
 
 /**
@@ -2542,15 +3177,6 @@ const MAX_CHILDREN_PER_AGENT = 8
 /** A backstop on the whole canvas, so a spawn loop can't run up a bill. */
 const MAX_SESSIONS = 24
 
-/**
- * How long one plan may get.
- *
- * A plan accumulates: the orchestrator writes more steps every time a result
- * comes back, and the evaluator-optimizer shape *is* that loop on purpose.
- * Without a ceiling in the app, "revise until it is good" has no end that
- * anyone but the user pays for.
- */
-const MAX_PLAN_STEPS = 24
 
 export function spawnDepth(edges: Edge[], nodeId: string): number {
   let depth = 0
@@ -2573,8 +3199,48 @@ export function spawnDepth(edges: Edge[], nodeId: string): number {
  * have started an agent that does not exist — the one failure mode worse than
  * failing.
  */
-function noteOnNode(nodeId: string, text: string) {
-  useStore.setState((s) => ({
+
+/**
+ * Agents currently being given a checkout.
+ *
+ * Two callers race on a spawn — the one that creates the agent and the one
+ * that is about to send it its first turn — and two `git worktree add` runs
+ * for the same branch is a confusing error rather than a second worktree. The
+ * second caller waits on the first's promise and gets the same answer.
+ */
+const isolating = new Map<string, Promise<{ branch: string } | { error: string }>>()
+
+/**
+ * Give a freshly spawned agent its own checkout, when the canvas says so.
+ *
+ * Silent when the rule is off or the agent has no repository to branch from —
+ * a canvas pointed at a plain directory is a normal way to work, not an error
+ * worth a message. A git failure is not silent: it lands on the agent's own
+ * node, because an agent that quietly shares a directory it was supposed to
+ * own is the exact failure this rule exists to prevent.
+ */
+async function autoIsolate(api: CanvasStore, nodeId: string): Promise<void> {
+  const st = api.getState()
+  if (!st.isolateSpawns) return
+  const node = st.nodes.find((n) => n.id === nodeId)
+  if (!node || !isSession(node)) return
+
+  const inFlight = isolating.get(nodeId)
+  if (inFlight) {
+    await inFlight
+    return
+  }
+
+  const run = st.isolateSession(nodeId)
+  isolating.set(nodeId, run)
+  const out = await run.finally(() => isolating.delete(nodeId))
+  if ('error' in out) {
+    noteOnNode(api, nodeId, `Could not give this agent its own worktree: ${out.error}`)
+  }
+}
+
+function noteOnNode(api: CanvasStore, nodeId: string, text: string) {
+  api.setState((s) => ({
     nodes: s.nodes.map((n) =>
       n.id === nodeId && n.type === 'session'
         ? {
@@ -2597,18 +3263,18 @@ function noteOnNode(nodeId: string, text: string) {
  * just this canvas: a role worth naming is worth keeping, and the orchestrator
  * is told as much when it defines one.
  */
-async function maybeDefinePersonas(text: string) {
+async function maybeDefinePersonas(api: CanvasStore, text: string) {
   const defined = parsePersonaDefinitions(text)
   if (!defined.length) return
 
-  const current = useStore.getState().library
+  const current = api.getState().library
   const known = new Set(current.map((p) => p.name.trim().toLowerCase()))
   // An existing name is left alone: redefining "reviewer" mid-conversation
   // would silently rewrite a persona the user tuned themselves.
   const fresh = defined.filter((p) => !known.has(p.name.trim().toLowerCase()))
   if (!fresh.length) return
 
-  await useStore.getState().setLibrary([...current, ...fresh])
+  await api.getState().setLibrary([...current, ...fresh])
 }
 
 /**
@@ -2640,10 +3306,10 @@ export function parseSpawn(text: string): { personality: string; task: string } 
   return m ? { personality: m[1], task: m[2].trim() } : null
 }
 
-async function maybeSpawn(fromNodeId: string, text: string) {
+async function maybeSpawn(api: CanvasStore, fromNodeId: string, text: string) {
   const parsed = parseSpawn(text)
   if (!parsed) return
-  await spawnChild(fromNodeId, parsed.personality, parsed.task)
+  await spawnChild(api, fromNodeId, parsed.personality, parsed.task)
 }
 
 /**
@@ -2666,8 +3332,7 @@ type SpawnResult =
  * rather than only landing on the node, so the plan can show which step
  * failed and why.
  */
-async function spawnChild(
-  fromNodeId: string,
+async function spawnChild(api: CanvasStore, fromNodeId: string,
   personalityName: string,
   task: string,
   /**
@@ -2682,11 +3347,11 @@ async function spawnChild(
   defer = false,
 ): Promise<SpawnResult> {
   const refuse = (error: string): SpawnResult => {
-    noteOnNode(fromNodeId, error)
+    noteOnNode(api, fromNodeId, error)
     return { ok: false, error }
   }
 
-  const st = useStore.getState()
+  const st = api.getState()
   const parent = st.nodes.find((n) => n.id === fromNodeId)
   if (!parent || parent.type !== 'session') {
     return { ok: false, error: 'That agent is no longer on the canvas.' }
@@ -2738,8 +3403,8 @@ async function spawnChild(
     st.nodes.map(boxOf),
   )
 
-  const childId = useStore.getState().addSession(persona.provider, pos)
-  markAutoPlaced(childId)
+  const childId = api.getState().addSession(persona.provider, pos)
+  markAutoPlaced(api, childId)
   const taken = new Set(
     useStore
       .getState()
@@ -2759,7 +3424,7 @@ async function spawnChild(
       st.nodes.some((n) => n.id === e.source && n.type === 'folder'),
   )
 
-  useStore.setState((s) => ({
+  api.setState((s) => ({
     nodes: s.nodes.map((n) =>
       n.id === childId && n.type === 'session'
         ? {
@@ -2801,23 +3466,27 @@ async function spawnChild(
     ],
   }))
 
+  // Before the first turn, not after: a worker that starts working in the
+  // shared directory has already written the file this was meant to protect.
+  await autoIsolate(api, childId)
+
   // The brief rides on the child's own `instructions`, which `send` injects —
   // prepending it here as well would send it twice.
-  await useStore.getState().send(childId, task)
+  await api.getState().send(childId, task)
 
-  await whenIdle(childId)
+  await whenIdle(api, childId)
 
-  const done = useStore.getState().nodes.find((n) => n.id === childId)
+  const done = api.getState().nodes.find((n) => n.id === childId)
   const answer = done && done.type === 'session' ? (done.data.messages.at(-1)?.text ?? '') : ''
   if (answer && done?.type === 'session') {
     // The child's whole reply used to be spliced into the parent's context.
     // It is written for the user — it reads files aloud and shows its working —
     // so the parent paid for all of that to find the one paragraph it needed.
     // Its REPORT block is what travels; the rest stays on the child's node.
-    handOver(parent.data.sessionId, done.data.sessionId)
+    handOver(api, parent.data.sessionId, done.data.sessionId)
     const report = reportBlock(name, persona.name, handBack(answer))
     if (defer) return { ok: true, childId, report }
-    await useStore.getState().send(fromNodeId, report)
+    await api.getState().send(fromNodeId, report)
   }
   return { ok: true, childId }
 }
@@ -2832,8 +3501,7 @@ async function spawnChild(
  * the node, and the plan loses the right to fan out: whichever half is wrong,
  * running it in order is the reading that cannot be expensive by mistake.
  */
-function mismatch(
-  fromNodeId: string,
+function mismatch(api: CanvasStore, fromNodeId: string,
   id: PatternId | undefined,
   count: number,
   /** What the user actually asked for, so a chore can be held to one step. */
@@ -2845,13 +3513,13 @@ function mismatch(
   // only wrong against what was asked.
   if (count > 1 && looksLikeChore(goal)) {
     const complaint = `You asked for one thing and this came back as ${count} steps. Approve only the step you wanted, or drop the plan — running it in order either way.`
-    noteOnNode(fromNodeId, complaint)
+    noteOnNode(api, fromNodeId, complaint)
     return { warning: complaint }
   }
   if (!id) return {}
   const complaint = checkShape(id, count)
   if (!complaint) return {}
-  noteOnNode(fromNodeId, complaint)
+  noteOnNode(api, fromNodeId, complaint)
   return { warning: complaint }
 }
 
@@ -2859,11 +3527,21 @@ function mismatch(
  * Turn what the orchestrator wrote into a plan waiting on the user.
  *
  * Steps land pending — nothing has run, and nothing will until the user says
- * so. A reply that arrives while a plan is still live adds to it rather than
- * replacing it: the orchestrator writes again after each step reports back,
- * and throwing away the steps already approved would lose the thread.
+ * so. The question this has to answer first is *which* plan the reply belongs
+ * to, and the answer is in the turn it is replying to. A step that ran hands
+ * its worker's report back as the orchestrator's next turn, so a reply to a
+ * report is the orchestrator writing more of the plan that worker came from —
+ * that is the loop the shapes are built around, and throwing away the steps
+ * already approved would lose the thread.
+ *
+ * A reply to anything else starts a plan of its own. Asking for a second fix
+ * while the first is still running is a second job, and the canvas used to
+ * have nowhere to put it: the steps went onto the end of whatever plan was
+ * live, under a shape chosen for a different question, until the count tripped
+ * the mismatch warning and blamed the orchestrator for a merge the app had
+ * done to it.
  */
-function proposePlan(fromNodeId: string, text: string) {
+function proposePlan(api: CanvasStore, fromNodeId: string, text: string) {
   const parsed = parsePlan(text)
   if (!parsed.length) return
 
@@ -2881,17 +3559,30 @@ function proposePlan(fromNodeId: string, text: string) {
   // The shape belongs in the feed as much as on the plan: it is the decision
   // that explains why the next thing to happen is three agents rather than
   // one, and it is made before any of them exist.
-  if (chosen) logPulse(fromNodeId, 'shape', `${chosen.id} — ${chosen.why}`)
+  if (chosen) logPulse(api, fromNodeId, 'shape', `${chosen.id} — ${chosen.why}`)
 
-  useStore.setState((s) => {
-    const carry = s.plan && s.plan.fromNodeId === fromNodeId && planLive(s.plan.steps) ? s.plan : null
+  api.setState((s) => {
+    const node = s.nodes.find((n) => n.id === fromNodeId)
+    const mine = s.plans.filter((p) => p.fromNodeId === fromNodeId)
+
+    // The turn this reply answers. A report in it names the worker that wrote
+    // it, and that worker is a step of exactly one plan.
+    const incoming =
+      node && isSession(node)
+        ? [...node.data.messages].reverse().find((m) => m.role === 'user')?.text
+        : undefined
+    const carry = planOfReply(s.plans, fromNodeId, incoming ?? '', (childId) => {
+      const kid = s.nodes.find((n) => n.id === childId)
+      return kid && isSession(kid) ? kid.data.name : undefined
+    })
+
     if (carry) {
       // A plan grows every time the orchestrator writes again, and it writes
       // again after each step reports back. Nothing in that loop ends it on
       // its own — an agent asked to critique its own plan will happily keep
       // finding one more thing — so the ceiling is the app's, not the model's.
       if (carry.steps.length >= MAX_PLAN_STEPS) {
-        noteOnNode(
+        noteOnNode(api, 
           fromNodeId,
           `This plan is already ${carry.steps.length} steps long, the limit. Approve or drop what's there, or start a fresh plan — a plan that keeps growing after every result is usually a loop rather than progress.`,
         )
@@ -2900,33 +3591,50 @@ function proposePlan(fromNodeId: string, text: string) {
       const grown = [...carry.steps, ...steps].slice(0, MAX_PLAN_STEPS)
       const shape = chosen ?? carry.pattern
       return {
-        plan: {
-          ...carry,
+        plans: withPlan(s.plans, carry.id, (p) => ({
+          ...p,
           // A later reply may re-shape the job it is still in the middle of —
           // that is the orchestrator-worker case, where what the work needs is
           // only clear once some of it has run.
           ...(chosen ? { pattern: chosen } : {}),
-          ...mismatch(fromNodeId, shape?.id, grown.length, carry.goal),
+          ...mismatch(api, fromNodeId, shape?.id, grown.length, carry.goal),
           steps: grown,
-        },
+        })),
       }
     }
 
-    const node = s.nodes.find((n) => n.id === fromNodeId)
-    // What was asked for, so a plan still makes sense hours later.
+    // A new track of work. Only live plans count against the ceiling: one that
+    // has finished is a record on the canvas, not a job in flight, and making
+    // the user clear their history to start something would be the wrong
+    // lesson from a backstop.
+    if (mine.filter((p) => planLive(p.steps)).length >= MAX_PLANS) {
+      noteOnNode(api, 
+        fromNodeId,
+        `This agent already has ${MAX_PLANS} plans on the go, the limit. Finish or drop one before starting another — that many jobs at once from one orchestrator is usually a loop rather than progress.`,
+      )
+      return s
+    }
+
+    // What was asked for, so a plan still makes sense hours later. The report
+    // that started a plan is not what was asked for, so a plan that grew out of
+    // a hand-back never gets here — this is only ever a user's own words.
     const goal =
       node && isSession(node)
         ? (node.data.messages.filter((m) => m.role === 'user').at(-1)?.text ?? '')
         : ''
     return {
-      plan: {
-        fromNodeId,
-        goal: goal.slice(0, 240),
-        steps,
-        proposedAt: Date.now(),
-        ...(chosen ? { pattern: chosen } : {}),
-        ...mismatch(fromNodeId, chosen?.id, steps.length, goal),
-      },
+      plans: [
+        ...s.plans,
+        {
+          id: `plan_${uid()}`,
+          fromNodeId,
+          goal: goal.slice(0, 240),
+          steps,
+          proposedAt: Date.now(),
+          ...(chosen ? { pattern: chosen } : {}),
+          ...mismatch(api, fromNodeId, chosen?.id, steps.length, goal),
+        },
+      ],
     }
   })
 }
@@ -2935,19 +3643,21 @@ function proposePlan(fromNodeId: string, text: string) {
  * Run one approved step. Marks it running while its agent works, then done or
  * failed — a plan that ran is a record of what happened, not a blank slate.
  */
-async function runPlanStep(fromNodeId: string, stepId: string, defer = false): Promise<string | null> {
+async function runPlanStep(api: CanvasStore, fromNodeId: string, stepId: string, defer = false): Promise<string | null> {
   const patch = (fn: (s: PlanStep) => PlanStep) =>
-    useStore.setState((s) =>
-      s.plan
-        ? { plan: { ...s.plan, steps: s.plan.steps.map((st) => (st.id === stepId ? fn(st) : st)) } }
-        : s,
-    )
+    api.setState((s) => ({
+      plans: s.plans.map((p) =>
+        p.steps.some((st) => st.id === stepId)
+          ? { ...p, steps: p.steps.map((st) => (st.id === stepId ? fn(st) : st)) }
+          : p,
+      ),
+    }))
 
-  const step = useStore.getState().plan?.steps.find((x) => x.id === stepId)
+  const step = findStep(api.getState().plans, stepId)?.step
   if (!step || step.state !== 'pending') return null
 
   patch((st) => ({ ...st, state: 'running', error: undefined }))
-  const result = await spawnChild(fromNodeId, step.persona, step.task, defer)
+  const result = await spawnChild(api, fromNodeId, step.persona, step.task, defer)
   patch((st) =>
     result.ok
       ? { ...st, state: 'done', childId: result.childId }
@@ -2970,10 +3680,11 @@ async function runPlanStep(fromNodeId: string, stepId: string, defer = false): P
  * awaits anything, so the per-agent and per-canvas limits still see each other
  * even though the turns overlap.
  */
-async function runPlanFanout(fromNodeId: string) {
-  const approved = (useStore.getState().plan?.steps ?? [])
-    .filter((st) => st.state === 'pending')
-    .map((st) => st.id)
+async function runPlanFanout(api: CanvasStore, planId: string) {
+  const plan = api.getState().plans.find((p) => p.id === planId)
+  if (!plan) return
+  const fromNodeId = plan.fromNodeId
+  const approved = plan.steps.filter((st) => st.state === 'pending').map((st) => st.id)
   if (!approved.length) return
 
   // Every approved step runs — but no more than MAX_FANOUT of them are in
@@ -2984,14 +3695,14 @@ async function runPlanFanout(fromNodeId: string) {
   const reports: string[] = []
   for (let i = 0; i < approved.length; i += MAX_FANOUT) {
     const wave = approved.slice(i, i + MAX_FANOUT)
-    const done = await Promise.all(wave.map((id) => runPlanStep(fromNodeId, id, true)))
+    const done = await Promise.all(wave.map((id) => runPlanStep(api, fromNodeId, id, true)))
     reports.push(...done.filter((r): r is string => !!r))
   }
   if (!reports.length) return
 
   // Still on the canvas? A user who deleted the orchestrator while its workers
   // ran has said what they think of the results.
-  const parent = useStore.getState().nodes.find((n) => n.id === fromNodeId)
+  const parent = api.getState().nodes.find((n) => n.id === fromNodeId)
   if (!parent || parent.type !== 'session') return
 
   await useStore
@@ -3002,7 +3713,7 @@ async function runPlanFanout(fromNodeId: string) {
     )
 }
 
-async function maybeDelegate(fromNodeId: string, text: string) {
+async function maybeDelegate(api: CanvasStore, fromNodeId: string, text: string) {
   // Same backtracking trap as SPAWN: require a non-space first character.
   const match = text.match(/^\s*DELEGATE\s+([\w.-]+)\s*:[ \t]*(\S.*)$/im)
   if (!match) return
@@ -3016,7 +3727,7 @@ async function maybeDelegate(fromNodeId: string, text: string) {
   const chained = delegations.get(fromNodeId) ?? 0
   if (chained >= MAX_DELEGATE_CHAIN) {
     delegations.delete(fromNodeId)
-    noteOnNode(
+    noteOnNode(api, 
       fromNodeId,
       `Stopped delegating after ${MAX_DELEGATE_CHAIN} hand-offs in a row — that usually means two agents are passing the same task back and forth. Say what you want done next.`,
     )
@@ -3024,7 +3735,7 @@ async function maybeDelegate(fromNodeId: string, text: string) {
   }
   delegations.set(fromNodeId, chained + 1)
 
-  const s = useStore.getState()
+  const s = api.getState()
   const from = s.nodes.find((n) => n.id === fromNodeId)
   const target = s.nodes.find(
     (n) => n.type === 'session' && n.data.name.toLowerCase() === targetName.toLowerCase(),
@@ -3033,25 +3744,25 @@ async function maybeDelegate(fromNodeId: string, text: string) {
 
   // Draw the transient call edge for the life of the call.
   const callId = `call_${uid()}`
-  useStore.setState((st) => ({
+  api.setState((st) => ({
     edges: [
       ...st.edges,
       { id: callId, source: fromNodeId, target: target.id, type: 'call', data: {} },
     ],
   }))
 
-  await useStore.getState().send(target.id, task.trim())
+  await api.getState().send(target.id, task.trim())
 
   // Wait for the delegate to finish, then hand the answer back.
-  await whenIdle(target.id)
+  await whenIdle(api, target.id)
 
-  useStore.setState((st) => ({ edges: st.edges.filter((e) => e.id !== callId) }))
+  api.setState((st) => ({ edges: st.edges.filter((e) => e.id !== callId) }))
 
-  const done = useStore.getState().nodes.find((n) => n.id === target.id)
+  const done = api.getState().nodes.find((n) => n.id === target.id)
   const answer =
     done && done.type === 'session' ? (done.data.messages.at(-1)?.text ?? '') : ''
   if (answer && from.type === 'session' && done?.type === 'session') {
-    handOver(from.data.sessionId, done.data.sessionId)
+    handOver(api, from.data.sessionId, done.data.sessionId)
     await useStore
       .getState()
       .send(fromNodeId, reportBlock(done.data.name, 'delegate', handBack(answer)))
@@ -3068,8 +3779,8 @@ async function maybeDelegate(fromNodeId: string, text: string) {
  * because a third agent watching this one has still not seen it; it is only
  * this reader that is already holding it.
  */
-function handOver(toSessionId: string, fromSessionId: string) {
-  useStore.setState((s) => {
+function handOver(api: CanvasStore, toSessionId: string, fromSessionId: string) {
+  api.setState((s) => {
     const mine = s.bus.filter((e) => e.sessionId === fromSessionId).map((e) => e.id)
     if (!mine.length) return s
     return {

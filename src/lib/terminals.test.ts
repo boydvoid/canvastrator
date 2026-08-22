@@ -30,7 +30,7 @@ const snapshot = (nodes: GtNode[]) =>
     globalRules: '',
     notifications: [],
     planning: true,
-    plan: null,
+    plans: [],
     orchestra: { provider: null, heavy: null, mid: null, light: null },
   }) as never
 

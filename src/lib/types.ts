@@ -221,6 +221,8 @@ export type AgentEvent =
       mcpTools: string[]
     }
   | { kind: 'toolCall'; name: string; detail: string; paths: PathTouch[] }
+  /** The prompt one API call read, i.e. how full the window is. See `event.rs`. */
+  | { kind: 'context'; tokens: number }
   | {
       kind: 'result'
       text: string
@@ -277,10 +279,23 @@ export type PlanStep = {
 /**
  * Work the orchestrator proposed and the user hasn't agreed to yet.
  *
- * One plan at a time per canvas: a plan is the answer to "what are we doing",
- * and two of them competing is the state this is meant to prevent.
+ * Several at a time, one per thing being fixed. A canvas used to hold exactly
+ * one, on the theory that a plan is the answer to "what are we doing" — but an
+ * orchestrator is perfectly capable of two unrelated repairs at once, and with
+ * one slot the second ask had nowhere to go but onto the end of the first. The
+ * result was a plan that said "one agent, start to finish" over four steps
+ * from two different conversations: not a plan any more, just a queue with a
+ * headline it had outgrown.
  */
 export type Plan = {
+  /**
+   * Its own identity, because a canvas holds several at once.
+   *
+   * One orchestrator can be running two fixes side by side, and the steps of
+   * one are not the steps of the other — so everything that acts on a plan
+   * names which one, rather than acting on "the plan" and hoping.
+   */
+  id: string
   /** The orchestrator that wrote it. */
   fromNodeId: string
   /**
@@ -318,6 +333,31 @@ export type SessionNodeData = {
   notice?: { label: string; detail: string }
   /** Set when the turn ended on a question, so the session is waiting on you. */
   awaitingUser?: boolean
+  /**
+   * What the project's check said about this agent's work, last time it ran.
+   *
+   * Held per agent rather than per canvas because, once agents are isolated,
+   * each one is checked in its own worktree: "the tests pass" is a claim about
+   * one checkout, and on a squad four of them can disagree.
+   */
+  check?: {
+    state: 'running' | 'pass' | 'fail'
+    at: number
+    ms?: number
+    code?: number | null
+    /** The end of the output, which is where a runner puts its failures. */
+    tail?: string
+    /** Set when the check could not run — not the same as failing. */
+    error?: string
+  }
+  /**
+   * Whether this agent has written anything since its work was last checked.
+   *
+   * The trigger for an automatic check: a turn that only read files has not
+   * changed what a check would say, and re-running a suite to learn that is
+   * minutes of nothing.
+   */
+  unchecked?: boolean
   /** Skills and slash commands this session reported at startup. */
   skills?: string[]
   commands?: string[]
@@ -387,6 +427,18 @@ export type SessionNodeData = {
   sentFiles?: Record<string, string>
   /** The provider's own conversation id — how continuity survives a turn. */
   providerSessionId?: string
+  /**
+   * A handover note waiting for the next turn.
+   *
+   * Set when this agent's window was compacted: the provider session is gone,
+   * so the next turn opens a fresh one and this is the only thing carried
+   * across. Cleared once it has been sent — it is a handover, not a standing
+   * instruction, and repeating it every turn would refill the window it exists
+   * to empty.
+   */
+  carry?: string
+  /** How many times this agent's window has been recycled. */
+  compactions?: number
   messages: Message[]
   usage: { costUsd: number; inputTokens: number; outputTokens: number }
   /**
@@ -412,10 +464,32 @@ export type SessionNodeData = {
  * anything *on* the canvas — they describe the canvas itself — so they live in
  * screen space now, stacked in the corner, untouched by pan or zoom.
  */
-export type PanelKey = 'pulse' | 'usage' | 'personas'
+export type PanelKey =
+  | 'pulse'
+  | 'decisions'
+  | 'shared'
+  | 'changes'
+  | 'usage'
+  | 'skills'
+  | 'personas'
 
-/** Top to bottom, in the order they stack. */
-export const PANEL_KEYS: readonly PanelKey[] = ['pulse', 'usage', 'personas']
+/**
+ * Top to bottom, in the order they stack.
+ *
+ * The order is the order of the questions during a run: what is happening,
+ * what is waiting on me, what has been written, what it cost. The library sits
+ * under all four because it is what you reach for between runs rather than
+ * during one.
+ */
+export const PANEL_KEYS: readonly PanelKey[] = [
+  'pulse',
+  'decisions',
+  'shared',
+  'changes',
+  'usage',
+  'skills',
+  'personas',
+]
 
 /**
  * `open` is whether the panel is on screen at all; `minimized` is whether it
@@ -432,18 +506,22 @@ export type Panels = Record<PanelKey, PanelState>
  */
 export const DEFAULT_PANELS: Panels = {
   pulse: { open: false, minimized: false },
+  decisions: { open: false, minimized: false },
+  shared: { open: false, minimized: false },
+  changes: { open: false, minimized: false },
   usage: { open: false, minimized: false },
+  skills: { open: false, minimized: false },
   personas: { open: false, minimized: false },
 }
 
 /**
- * The Landing module, as a node.
+ * The Changes module, as a node.
  *
  * Holds an id and nothing else, like the other two modules: the files it lists
  * are read off the canvas and the line counts off git, and a stored copy of
  * either would be a second version of what changed.
  */
-export type LandingNodeData = { landingId: string }
+export type ChangesNodeData = { changesId: string }
 
 /**
  * A real shell on the canvas.
@@ -468,6 +546,25 @@ export type FolderNodeData = {
   path: string
   /** Missing directories must be visible, not a confusing spawn failure. */
   missing?: boolean
+  /**
+   * Set when this folder is a git worktree the canvas cut for an agent.
+   *
+   * A worktree *is* a directory, so it is the same node type with the same
+   * wiring rules — dragging it into an agent makes it that agent's working
+   * directory exactly like any other folder. What it adds is where it came
+   * from, which is the part that makes a parallel run readable: four folders
+   * called `app` say nothing, four branches say who is doing what.
+   */
+  worktree?: { branch: string; repo: string }
+  /**
+   * A worktree node placed but not yet cut.
+   *
+   * The node appears the moment you ask for one and takes the branch name on
+   * the canvas, so the gesture is "put one here" rather than "answer a dialog,
+   * then find where it landed". Until the name is entered there is no
+   * directory, which is why a draft can be wired to nothing.
+   */
+  draft?: boolean
 }
 
 /**
@@ -502,6 +599,13 @@ export type DiscoveredSkill = {
   provider: Provider
   /** "user", "project", or the plugin it came from. */
   source: string
+  /**
+   * `skill` for a SKILL.md, `command` for a slash-command file.
+   *
+   * The canvas treats both as capabilities the agent already has — the
+   * difference is only that a command is invoked by typing its name.
+   */
+  kind: 'skill' | 'command'
   path: string
 }
 
@@ -580,6 +684,10 @@ export type NotificationKind =
   | 'turn'
   | 'question'
   | 'error'
+  /** The project's own check ran against what an agent wrote. */
+  | 'check'
+  /** A context window was recycled into a handover note. */
+  | 'compact'
   | 'prompt'
   | 'shape'
   | 'spawned'
@@ -613,7 +721,7 @@ export type Notification = {
  * library used to be a drawer here too — it is a floating panel now, so it has
  * no tab.
  */
-export type RightTab = 'canvases' | 'decisions' | 'chat'
+export type RightTab = 'canvases' | 'rationale' | 'chat'
 
 export type SkillTrigger = 'on-attach' | 'manual' | 'always'
 

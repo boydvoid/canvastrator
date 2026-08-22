@@ -9,6 +9,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { detectCheck, guardRules, type GuardRule } from '@/lib/bridge'
 import {
   ContextMenuItem,
   ContextMenuLabel,
@@ -26,7 +27,7 @@ import {
 } from '@/lib/canvas'
 import type { CanvasMeta } from '@/lib/persist'
 import { SHORTCUT_LABEL } from '@/lib/shortcuts'
-import { useStore } from '@/lib/store'
+import { useInViewRef, useStore } from '@/lib/store'
 import { cn, timeAgo as when } from '@/lib/utils'
 
 /** "Old" for the sweep in the open dialog: untouched for a month. */
@@ -211,6 +212,7 @@ export function CanvasStatus() {
 
 /** Open / Save-as / rules overlays, plus the shortcuts that raise them. */
 export function CanvasDialogs() {
+  const inView = useInViewRef()
   const dialog = useStore((s) => s.canvasDialog)
   const setDialog = useStore((s) => s.setCanvasDialog)
   const openFilePath = useStore((s) => s.openFilePath)
@@ -233,9 +235,14 @@ export function CanvasDialogs() {
         newCanvas()
       }
     }
-    document.addEventListener('keydown', onKey, true)
-    return () => document.removeEventListener('keydown', onKey, true)
-  }, [setDialog, openFilePath])
+    // Once per open canvas otherwise: ⌘N would start a canvas for every one
+    // already on the desk, and ⌘S would save them all. See `useInView`.
+    const guarded = (e: KeyboardEvent) => {
+      if (inView.current) onKey(e)
+    }
+    document.addEventListener('keydown', guarded, true)
+    return () => document.removeEventListener('keydown', guarded, true)
+  }, [inView, setDialog, openFilePath])
 
   if (!dialog) return null
   return (
@@ -304,6 +311,38 @@ function RulesPanel() {
   const rules = useStore((s) => s.globalRules)
   const setRules = useStore((s) => s.setGlobalRules)
   const setDialog = useStore((s) => s.setCanvasDialog)
+  const isolate = useStore((s) => s.isolateSpawns)
+  const setIsolate = useStore((s) => s.setIsolateSpawns)
+  const check = useStore((s) => s.checkCommand)
+  const setCheck = useStore((s) => s.setCheckCommand)
+  const guards = useStore((s) => s.guards)
+  const setGuards = useStore((s) => s.setGuards)
+  const [guardable, setGuardable] = useState<GuardRule[]>([])
+
+  useEffect(() => {
+    let live = true
+    void guardRules()
+      .then((r) => live && setGuardable(r))
+      .catch(() => live && setGuardable([]))
+    return () => {
+      live = false
+    }
+  }, [])
+  const cwd = useStore((s) => s.cwd)
+  const [guess, setGuess] = useState<string | null>(null)
+
+  // Offered, never applied: a wrong guess that ran on its own would be worse
+  // than no guess, and the command is the one setting here that executes.
+  useEffect(() => {
+    let live = true
+    if (check.trim() || !cwd) return
+    void detectCheck(cwd)
+      .then((g) => live && setGuess(g))
+      .catch(() => live && setGuess(null))
+    return () => {
+      live = false
+    }
+  }, [check, cwd])
 
   return (
     <>
@@ -322,6 +361,83 @@ function RulesPanel() {
           placeholder="e.g. Never commit or push. Run the tests before reporting done."
           className="min-h-0 flex-1 resize-none rounded-md border border-line bg-canvas p-2 font-mono text-[11px] leading-relaxed text-fg outline-none placeholder:text-fg-faint focus:border-line-strong"
         />
+
+        {/* A rule about where agents work, next to the rules about how they
+            work — both are things this canvas imposes on every agent it
+            spawns, and both only apply to the next one. */}
+        <label className="flex shrink-0 cursor-pointer items-start gap-2 rounded-md border border-line bg-canvas p-2.5">
+          <input
+            type="checkbox"
+            checked={isolate}
+            onChange={(e) => setIsolate(e.target.checked)}
+            className="mt-[3px] shrink-0 accent-[var(--color-live)]"
+          />
+          <span className="flex min-w-0 flex-col gap-0.5">
+            <span className="font-mono text-[11px] text-fg">Give each new agent its own worktree</span>
+            <span className="font-mono text-[10px] leading-relaxed text-fg-subtle">
+              A git checkout per agent, on a <code>wt/</code> branch beside the repository, so a squad
+              editing the same project cannot overwrite each other. Agents already on the canvas keep
+              the folder they have.
+            </span>
+          </span>
+        </label>
+
+        {guardable.length > 0 && (
+          <div className="flex shrink-0 flex-col gap-1.5 rounded-md border border-line bg-canvas p-2.5">
+            <span className="font-mono text-[11px] text-fg">Ask before</span>
+            <span className="font-mono text-[10px] leading-relaxed text-fg-subtle">
+              Held back by the app itself, not by the provider's permission mode: the command never
+              runs, and the agent is told to ask you. Allow one from the agent's inspector when it
+              does.
+            </span>
+            {guardable.map((r) => {
+              const on = guards.includes(r.id)
+              return (
+                <label key={r.id} className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={(e) =>
+                      setGuards(
+                        e.target.checked
+                          ? [...guards, r.id]
+                          : guards.filter((g) => g !== r.id),
+                      )
+                    }
+                    className="shrink-0 accent-[var(--color-attn)]"
+                  />
+                  <span className="min-w-0 font-mono text-[10.5px] text-fg-muted">
+                    <span className="text-fg">{r.id}</span> — {r.what}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        )}
+
+        <div className="flex shrink-0 flex-col gap-1.5 rounded-md border border-line bg-canvas p-2.5">
+          <span className="font-mono text-[11px] text-fg">Check command</span>
+          <span className="font-mono text-[10px] leading-relaxed text-fg-subtle">
+            Run in an agent's own folder after any turn that writes a file, and whenever you ask.
+            A failing check turns its node red — the project's verdict, rather than the agent's.
+          </span>
+          <input
+            value={check}
+            onChange={(e) => setCheck(e.target.value)}
+            onKeyDown={(e) => e.stopPropagation()}
+            spellCheck={false}
+            placeholder="nothing runs until you set one"
+            className="rounded border border-line bg-panel px-2 py-1.5 font-mono text-[11px] text-fg outline-none placeholder:text-fg-faint focus:border-line-strong"
+          />
+          {guess && !check.trim() && (
+            <button
+              onClick={() => setCheck(guess)}
+              className="self-start rounded px-1.5 py-0.5 font-mono text-[10px] text-fg-subtle hover:bg-surface hover:text-fg"
+            >
+              use <span className="text-fg-muted">{guess}</span>
+            </button>
+          )}
+        </div>
       </div>
       <ErrorLine />
     </>

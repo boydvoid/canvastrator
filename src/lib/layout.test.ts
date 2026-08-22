@@ -34,7 +34,89 @@ function assertNoOverlaps(nodes: GtNode[], placed: Record<string, { x: number; y
   }
 }
 
+const mcp = (id: string): GtNode =>
+  ({ id, type: 'mcp', position: { x: 0, y: 0 }, data: {} }) as never
+const tool = (id: string): GtNode =>
+  ({ id, type: 'mcptool', position: { x: 0, y: 0 }, data: {} }) as never
+
 describe('layoutCanvas', () => {
+  /**
+   * The bug this pins: a support feeding several agents was placed *after* the
+   * ranks were packed, at "leftmost thing I feed, minus one level gap" — a
+   * space nothing had set aside. A server with a column of tools was dropped
+   * into a gutter the rank before it already occupied, and landed on an agent.
+   * Every canvas with a shared MCP server had a pile in the middle of it.
+   */
+  it('leaves room for a support that feeds several agents, rather than dropping it on one', () => {
+    const tools = Array.from({ length: 6 }, (_, i) => tool(`t${i}`))
+    const nodes = [session('boss'), session('kid1'), session('kid2'), mcp('srv'), ...tools]
+    const edges = [
+      edge('boss', 'kid1', 'spawn'),
+      edge('boss', 'kid2', 'spawn'),
+      // Wired into both children, so it belongs to neither one's strip.
+      edge('srv', 'kid1', 'attach'),
+      edge('srv', 'kid2', 'attach'),
+      ...tools.map((t) => edge('srv', t.id, 'mcpuse')),
+    ]
+    const p = layoutCanvas(nodes, edges)
+    assertNoOverlaps(nodes, p)
+
+    // In front of what it feeds, which is what makes it read as an input.
+    expect(p.srv.x).toBeLessThan(p.kid1.x)
+    expect(p.srv.x).toBeLessThan(p.kid2.x)
+    // And its tools in the lane between, still reading left to right.
+    for (const t of tools) {
+      expect(p[t.id].x).toBeGreaterThan(p.srv.x)
+      expect(p[t.id].x).toBeLessThan(p.kid1.x)
+    }
+  })
+
+  /** Eleven tools in one column sets the height of everything near it. */
+  it('wraps a server’s tools into columns rather than one long tower', () => {
+    const tools = Array.from({ length: 9 }, (_, i) => tool(`t${i}`))
+    const nodes = [session('s1'), mcp('srv'), ...tools]
+    const edges = [edge('srv', 's1', 'attach'), ...tools.map((t) => edge('srv', t.id, 'mcpuse'))]
+    const p = layoutCanvas(nodes, edges)
+    assertNoOverlaps(nodes, p)
+
+    const cols = new Set(tools.map((t) => p[t.id].x))
+    const rows = new Set(tools.map((t) => p[t.id].y))
+    expect(cols.size).toBeGreaterThan(1)
+    expect(rows.size).toBeLessThanOrEqual(4)
+    // Still in the lane between the server and the agent it serves.
+    for (const t of tools) {
+      expect(p[t.id].x).toBeGreaterThan(p.srv.x)
+      expect(p[t.id].x).toBeLessThan(p.s1.x)
+    }
+  })
+
+  /**
+   * White space is what says which things belong together, so the gutter
+   * inside a group has to be visibly smaller than the gutter around it. This
+   * pins the ladder rather than any one number: chips in a stack sit closer
+   * than an agent sits to its files, which sit closer than two agents do.
+   */
+  it('spaces a group tighter than the gap around it', () => {
+    const files = Array.from({ length: 4 }, (_, i) => file(`f${i}`))
+    const nodes = [session('boss'), session('kid1'), session('kid2'), ...files]
+    const edges = [
+      edge('boss', 'kid1', 'spawn'),
+      edge('boss', 'kid2', 'spawn'),
+      ...files.map((f) => edge('kid1', f.id, 'file')),
+    ]
+    const p = layoutCanvas(nodes, edges)
+    assertNoOverlaps(nodes, p)
+
+    const ys = files.map((f) => p[f.id].y).sort((a, b) => a - b)
+    const withinStack = ys[1] - ys[0] - sizeOf(files[0]).h
+    const agentToFiles = Math.min(...files.map((f) => p[f.id].x)) - (p.kid1.x + sizeOf(nodes[1]).w)
+    const betweenAgents = Math.abs(p.kid2.y - p.kid1.y) - sizeOf(nodes[1]).h
+
+    expect(withinStack).toBeGreaterThan(0)
+    expect(agentToFiles).toBeGreaterThan(withinStack)
+    expect(betweenAgents).toBeGreaterThan(agentToFiles)
+  })
+
   /**
    * The bug this pins: the layout worked in a coordinate space of its own,
    * starting at the origin, while a node the user placed kept its real
@@ -119,9 +201,13 @@ describe('layoutCanvas', () => {
     const ys = new Set(folders.map((f) => p[f.id].y))
     expect(xs.size).toBe(2)
     expect(ys.size).toBe(3)
-    // The stack is three folders tall at most, whatever the count.
-    const span = Math.max(...ys) - Math.min(...ys) + sizeOf(folders[0]).h
-    expect(span).toBeLessThanOrEqual(3 * sizeOf(folders[0]).h + 2 * 18)
+    // The stack is three folders tall at most, whatever the count. Measured in
+    // rows rather than pixels: the gap between them is a number the layout is
+    // free to retune, and the cap on the tower is what this is about.
+    const rows = [...ys].sort((a, b) => a - b)
+    const gap = rows[1] - rows[0] - sizeOf(folders[0]).h
+    expect(rows.every((y, i) => i === 0 || y - rows[i - 1] === rows[1] - rows[0])).toBe(true)
+    expect(gap).toBeGreaterThan(0)
     // Columns grow away from the agent, never over it.
     expect(Math.max(...xs)).toBeLessThan(p.s1.x)
     assertNoOverlaps(nodes, p)
@@ -373,8 +459,10 @@ describe('layoutCanvas — ownership', () => {
 })
 
 describe('shape drives the ranking', () => {
+  /** Wrapped in a list: the canvas lays out every plan an agent has at once. */
   const plan = (patternId: string, childIds: (string | undefined)[], warning?: string) =>
-    ({
+    [{
+      id: 'plan1',
       fromNodeId: 'root',
       goal: 'g',
       proposedAt: 0,
@@ -387,7 +475,7 @@ describe('shape drives the ranking', () => {
         ...(childId ? { childId } : {}),
       })),
       ...(warning ? { warning } : {}),
-    }) as never
+    }] as never
 
   const squad = () => ({
     nodes: [session('root'), session('a'), session('b'), session('c')],

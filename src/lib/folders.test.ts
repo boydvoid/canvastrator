@@ -11,6 +11,10 @@ vi.mock('./bridge', () => ({
   dirExists: vi.fn(async () => true),
   fileExists: vi.fn(async () => false),
   readFileHead: vi.fn(async () => ''),
+  // Clearing takes each node out through `removeNode`, which tears down what
+  // the node owned outside the store.
+  clearSessionImages: vi.fn(async () => {}),
+  terminalClose: vi.fn(async () => {}),
 }))
 
 const {
@@ -345,6 +349,50 @@ describe('losing the working directory some other way', () => {
   })
 })
 
+/**
+ * Clearing is an edit to this canvas, not a move to another one — so the
+ * folders and the canvas's own identity have to come out the far side intact.
+ */
+describe('clearing the canvas', () => {
+  beforeEach(() => {
+    useStore.setState({
+      edges: [edge('f1', 's1', 'cwd'), edge('f2', 's1', 'attach')],
+      plans: [{ id: 'p1', fromNodeId: 's1', steps: [] }] as never,
+      autoPlaced: new Set(['f1', 's1']),
+      selectedId: 's1',
+      chatTarget: 's1',
+      openFilePath: '/tmp/api/README.md',
+      canvasId: 'canvas_here',
+      canvasName: 'mine',
+      canvasSavedAt: 42,
+    })
+  })
+
+  it('keeps the folders and the canvas, and takes everything else', () => {
+    useStore.getState().clearCanvas()
+
+    const s = useStore.getState()
+    expect(s.nodes.map((n) => n.id)).toEqual(['f1', 'f2'])
+    // Folders stay exactly where the user put them.
+    expect(s.nodes[0].position).toEqual({ x: 0, y: 0 })
+    // Both edges had the session as an endpoint, so neither survives it.
+    expect(s.edges).toEqual([])
+    // Plan steps are drawn from plans, so the cards go when the plans do.
+    expect(s.plans).toEqual([])
+    expect(s.bus).toEqual([])
+    expect(s.delivered).toEqual({})
+    expect([...s.autoPlaced]).toEqual(['f1'])
+    expect(s.selectedId).toBeNull()
+    expect(s.chatTarget).toBeNull()
+    expect(s.openFilePath).toBeNull()
+
+    // Still the same canvas, in the same place in the list.
+    expect(s.canvasId).toBe('canvas_here')
+    expect(s.canvasName).toBe('mine')
+    expect(s.canvasSavedAt).toBe(42)
+  })
+})
+
 describe('a canvas loaded with the invariant already broken', () => {
   it('opens with an heir promoted rather than a session that cannot be sent to', async () => {
     const { deserializeCanvas } = await import('./persist')
@@ -479,12 +527,15 @@ describe('a child of a multi-folder parent', () => {
     const before = new Set(useStore.getState().nodes.map((n) => n.id))
     useStore.setState({
       library: [persona],
-      plan: {
-        fromNodeId: parentId,
-        goal: 'ship it',
-        steps: [{ id: 'step1', persona: 'implementer', task: 'go', state: 'pending' }],
-        proposedAt: 0,
-      },
+      plans: [
+        {
+          id: 'plan1',
+          fromNodeId: parentId,
+          goal: 'ship it',
+          steps: [{ id: 'step1', persona: 'implementer', task: 'go', state: 'pending' }],
+          proposedAt: 0,
+        },
+      ],
     })
     const running = useStore.getState().approvePlanStep('step1')
     await settle()
@@ -497,7 +548,7 @@ describe('a child of a multi-folder parent', () => {
       ),
     }))
     await running
-    expect(useStore.getState().plan?.steps[0].error).toBeUndefined()
+    expect(useStore.getState().plans[0]?.steps[0].error).toBeUndefined()
     return childId
   }
 

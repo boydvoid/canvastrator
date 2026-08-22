@@ -237,6 +237,7 @@ export function SpawnEdge({
 export function PlanEdge({
   id,
   source,
+  data,
   sourceX,
   sourceY,
   targetX,
@@ -253,14 +254,19 @@ export function PlanEdge({
     targetPosition,
     borderRadius: 12,
   })
-  const accent = useSourceAccent(source)
+  const provider = useSourceAccent(source)
+  // The pattern's own colour where the plan declared one, so every wire of one
+  // plan matches and the card, its steps and the agent below read as a single
+  // object. Falls back to the source's accent for a plan with no shape.
+  const pattern = (data as { pattern?: string } | undefined)?.pattern
+  const accent = pattern ? `var(--color-pattern-${pattern})` : provider
   return (
     <BaseEdge
       id={id}
       path={path}
       style={{
-        stroke: `color-mix(in oklch, ${accent} 38%, transparent)`,
-        strokeWidth: 1.4,
+        stroke: `color-mix(in oklch, ${accent} 45%, transparent)`,
+        strokeWidth: 1.6,
         strokeDasharray: '4 4',
       }}
     />

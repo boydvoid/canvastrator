@@ -43,10 +43,10 @@ export function FloatingPanel({
     // editor is nothing but fields.
     <section
       data-shortcuts="off"
-      className="pointer-events-auto flex w-full shrink-0 flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-xl backdrop-blur"
+      className="pointer-events-auto flex w-full shrink-0 flex-col overflow-hidden rounded-[10px] border border-line-strong bg-surface/95 shadow-xl backdrop-blur"
     >
-      <header className="flex shrink-0 items-center gap-2 bg-surface-2/70 px-3 py-1.5">
-        <Icon size={11} className="shrink-0 text-fg-muted" />
+      <header className="flex shrink-0 items-center gap-2 bg-surface-2/70 px-3.5 py-[9px]">
+        <Icon size={12} className="shrink-0 text-fg-muted" />
         <span className="font-mono text-[9px] tracking-[0.11em] text-fg-faint">{title}</span>
         {badge && <span className="ml-auto flex min-w-0 items-center">{badge}</span>}
         <span className={cn('flex shrink-0 items-center gap-0.5', !badge && 'ml-auto')}>

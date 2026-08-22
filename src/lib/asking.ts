@@ -36,3 +36,40 @@ export function looksLikeQuestion(text: string): boolean {
 
   return ASKS.some((re) => re.test(withoutCode))
 }
+
+/**
+ * The last thing an agent said, or an empty string.
+ *
+ * Only assistant turns with text count: a turn that was nothing but tool calls
+ * said nothing to you, and quoting its empty body under "waiting on you" would
+ * be a banner with no question in it.
+ */
+export function lastSaid(messages: { role: string; text?: string }[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === 'assistant' && m.text?.trim()) return m.text
+  }
+  return ''
+}
+
+/**
+ * The question out of a turn that ended in one.
+ *
+ * The same last-line rule `looksLikeQuestion` uses, for the same reason: an
+ * agent that is actually waiting asks last, and the four paragraphs above the
+ * question are the report, not the ask. Markdown decoration comes off because
+ * this lands in a single line of a banner, where a stray `**` reads as a typo.
+ */
+export function questionTail(text: string): string {
+  const lines = text
+    .trim()
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  const tail = lines[lines.length - 1] ?? ''
+  return tail
+    .replace(/^[-*+]\s+/, '')
+    .replace(/^\d+[.)]\s+/, '')
+    .replace(/[*_`]/g, '')
+    .trim()
+}

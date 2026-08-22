@@ -37,6 +37,8 @@ export const KIND_LABEL: Record<NotificationKind, string> = {
   question: 'needs you',
   error: 'failed',
   wrote: 'wrote',
+  check: 'checked',
+  compact: 'compacted',
 }
 
 /**
@@ -47,7 +49,7 @@ export const KIND_LABEL: Record<NotificationKind, string> = {
  * tokens are for events whose meaning outranks whose they are: a question and
  * a failure are the two things you must not scroll past.
  */
-export type PulseTone = 'provider' | 'danger' | 'live' | 'muted'
+export type PulseTone = 'provider' | 'work' | 'attn' | 'danger' | 'live' | 'muted'
 
 export const KIND_TONE: Record<NotificationKind, PulseTone> = {
   prompt: 'muted',
@@ -56,11 +58,26 @@ export const KIND_TONE: Record<NotificationKind, PulseTone> = {
   turn: 'provider',
   question: 'danger',
   error: 'danger',
+  // The verdict decides the colour, not the kind — a check that passed and one
+  // that failed are the same event and opposite news — so entries of this kind
+  // carry their own tone. See `checkTone`.
+  check: 'live',
+  // Neither good news nor bad: a window was recycled and the work goes on.
+  compact: 'muted',
   wrote: 'live',
+}
+
+/** Green for a pass, red for a fail: the one kind whose tone is its content. */
+export function checkTone(headline: string): PulseTone {
+  return headline.startsWith('checks pass') ? 'live' : 'danger'
 }
 
 export function toneColor(tone: PulseTone, provider?: Provider): string {
   switch (tone) {
+    case 'work':
+      return 'var(--color-work)'
+    case 'attn':
+      return 'var(--color-attn)'
     case 'danger':
       return 'var(--color-danger)'
     case 'live':
@@ -120,7 +137,13 @@ export function nowSentence(now: PulseNow): string {
 }
 
 /**
- * The proportions of the state bar, in the order the sentence names them.
+ * The proportions of the state bar, in the order the counts name them.
+ *
+ * One segment per state, and every state gets its own colour: working is
+ * `work`, waiting on you is `attn`, failed is `danger`, landed is `live`.
+ * Questions and failures used to share the danger red, which made a canvas
+ * with one question look like a canvas with one broken agent — the two need
+ * opposite reactions.
  *
  * Returns null when there is nothing to draw rather than an array of zeroes,
  * so the bar is absent on an idle canvas instead of being a grey rule that
@@ -131,8 +154,9 @@ export function stateBar(now: PulseNow): { tone: PulseTone; fraction: number }[]
   if (!total) return null
   return (
     [
-      { tone: 'provider' as const, n: now.working },
-      { tone: 'danger' as const, n: now.needsYou + now.failed },
+      { tone: 'work' as const, n: now.working },
+      { tone: 'attn' as const, n: now.needsYou },
+      { tone: 'danger' as const, n: now.failed },
       { tone: 'live' as const, n: now.landed },
     ] satisfies { tone: PulseTone; n: number }[]
   )

@@ -7,7 +7,7 @@ import { useTheme } from '@/lib/theme'
 import { fileDiffBase, readBinaryBase64, readTextFile, writeTextFile } from '@/lib/bridge'
 import { computeHunks, describeHunk, hunkRange, revertHunk } from '@/lib/hunks'
 import { fileKind, mimeFor, monacoLanguage } from '@/lib/filekind'
-import { basename, useStore } from '@/lib/store'
+import { basename, useInViewRef, useStore } from '@/lib/store'
 import { cn } from '@/lib/utils'
 
 /** Above this we stop pretending an editor is the right tool. */
@@ -22,6 +22,7 @@ type Loaded =
   | { state: 'unsupported'; bytes?: number }
 
 export function FileViewer() {
+  const inView = useInViewRef()
   const path = useStore((s) => s.openFilePath)
   const close = useCallback(() => useStore.setState({ openFilePath: null }), [])
   const { theme } = useTheme()
@@ -108,9 +109,12 @@ export function FileViewer() {
         void save()
       }
     }
-    document.addEventListener('keydown', onKey, true)
-    return () => document.removeEventListener('keydown', onKey, true)
-  }, [path, close, save])
+    const guarded = (e: KeyboardEvent) => {
+      if (inView.current) onKey(e)
+    }
+    document.addEventListener('keydown', guarded, true)
+    return () => document.removeEventListener('keydown', guarded, true)
+  }, [inView, path, close, save])
 
   if (!path) return null
 

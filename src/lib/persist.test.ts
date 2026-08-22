@@ -38,7 +38,7 @@ const snapshot = (nodes: GtNode[], edges: Edge[] = []) => ({
   globalRules: '',
   notifications: [],
   planning: true,
-  plan: null,
+  plans: [],
 })
 
 describe('serializeCanvas', () => {
@@ -142,7 +142,11 @@ describe('the floating panels', () => {
   it('round-trips which are open and which are folded away', () => {
     const panels = {
       pulse: { open: true, minimized: false },
+      decisions: { open: true, minimized: false },
+      shared: { open: false, minimized: false },
+      changes: { open: false, minimized: true },
       usage: { open: true, minimized: true },
+      skills: { open: true, minimized: false },
       personas: { open: false, minimized: false },
     }
     const back = deserializeCanvas(
@@ -155,21 +159,25 @@ describe('the floating panels', () => {
     const back = deserializeCanvas({ ...serializeCanvas(snapshot([])), panels: undefined })
     expect(back.panels).toEqual({
       pulse: { open: false, minimized: false },
+      decisions: { open: false, minimized: false },
+      shared: { open: false, minimized: false },
+      changes: { open: false, minimized: false },
       usage: { open: false, minimized: false },
+      skills: { open: false, minimized: false },
       personas: { open: false, minimized: false },
     })
   })
 
   it('ignores a panel this build does not have, and a flag that is not one', () => {
-    // As a hand-edited file, or one from a build that knew a fourth panel,
-    // would carry it — hence the cast through unknown.
+    // As a hand-edited file, or one from a build that knew a panel this one
+    // does not, would carry it — hence the cast through unknown.
     const data = {
       ...serializeCanvas(snapshot([])),
-      panels: { pulse: { open: 'yes' }, landing: { open: true } },
+      panels: { pulse: { open: 'yes' }, weather: { open: true } },
     } as unknown as CanvasData
     const panels = deserializeCanvas(data).panels
     expect(panels?.pulse).toEqual({ open: false, minimized: false })
-    expect(panels).not.toHaveProperty('landing')
+    expect(panels).not.toHaveProperty('weather')
   })
 
   it('drops Pulse and Usage nodes from a canvas saved while they were nodes', () => {
@@ -237,6 +245,7 @@ describe('deserializeCanvas', () => {
 
 describe('plans across a save', () => {
   const plan = {
+    id: 'plan1',
     fromNodeId: 'a',
     goal: 'ship the export button',
     proposedAt: 1,
@@ -250,26 +259,45 @@ describe('plans across a save', () => {
   /** The agent a running step was waiting on died with the process. Leaving
    *  the step "running" for ever is worse than approving it twice. */
   it('reopens a step that was in flight when the app closed', () => {
-    const saved = serializeCanvas({ ...snapshot([session('a')]), plan })
-    expect(saved.plan?.steps.map((s) => s.state)).toEqual(['done', 'pending', 'pending'])
+    const saved = serializeCanvas({ ...snapshot([session('a')]), plans: [plan] })
+    expect(saved.plans?.[0]?.steps.map((s) => s.state)).toEqual(['done', 'pending', 'pending'])
     const back = deserializeCanvas(saved)
-    expect(back.plan?.steps.map((s) => s.state)).toEqual(['done', 'pending', 'pending'])
-    expect(back.plan?.steps[0].childId).toBe('b')
-    expect(back.plan?.goal).toBe('ship the export button')
+    expect(back.plans[0]?.steps.map((s) => s.state)).toEqual(['done', 'pending', 'pending'])
+    expect(back.plans[0]?.steps[0].childId).toBe('b')
+    expect(back.plans[0]?.goal).toBe('ship the export button')
+  })
+
+  it('keeps every plan the canvas had, in the order they were proposed', () => {
+    const second = { ...plan, id: 'plan2', goal: 'fix the import path' }
+    const back = deserializeCanvas(serializeCanvas({ ...snapshot([session('a')]), plans: [plan, second] }))
+    expect(back.plans.map((p) => p.goal)).toEqual(['ship the export button', 'fix the import path'])
+  })
+
+  /** Every canvas saved before an orchestrator could hold two jobs. */
+  it('reads the single plan a canvas saved before there were several', () => {
+    const back = deserializeCanvas({
+      ...serializeCanvas(snapshot([])),
+      plans: undefined,
+      plan: { ...plan, id: '' },
+    } as unknown as CanvasData)
+    expect(back.plans).toHaveLength(1)
+    expect(back.plans[0].goal).toBe('ship the export button')
+    // Named on the way in, because everything downstream acts on a plan by id.
+    expect(back.plans[0].id).toBeTruthy()
   })
 
   it('keeps planning on for a canvas saved before it existed', () => {
     const back = deserializeCanvas({ ...serializeCanvas(snapshot([])), planning: undefined })
     expect(back.planning).toBe(true)
-    expect(back.plan).toBeNull()
+    expect(back.plans).toEqual([])
   })
 
   it('survives a canvas whose plan is junk', () => {
     const back = deserializeCanvas({
       ...serializeCanvas(snapshot([])),
-      plan: { fromNodeId: 'a', goal: '', proposedAt: 0, steps: [] },
+      plans: [{ id: 'p', fromNodeId: 'a', goal: '', proposedAt: 0, steps: [] }],
     })
-    expect(back.plan).toBeNull()
+    expect(back.plans).toEqual([])
   })
 })
 
@@ -294,5 +322,95 @@ describe('image attachments on a message', () => {
     const loaded = back.type === 'session' ? back.data.messages : []
     expect(loaded).toEqual(messages)
     expect(loaded[0].images).toBeUndefined()
+  })
+})
+
+describe('worktree isolation', () => {
+  it('round-trips the rule', () => {
+    const back = deserializeCanvas(
+      JSON.parse(JSON.stringify(serializeCanvas({ ...snapshot([]), isolateSpawns: true }))),
+    )
+    expect(back.isolateSpawns).toBe(true)
+  })
+
+  it('is off for a canvas saved before worktrees existed', () => {
+    // Turning it on creates directories on disk, and a file written by an
+    // older build never consented to that.
+    const data = { ...serializeCanvas(snapshot([])), isolateSpawns: undefined }
+    expect(deserializeCanvas(data).isolateSpawns).toBe(false)
+  })
+
+  it('ignores a value that is not a boolean', () => {
+    const data = { ...serializeCanvas(snapshot([])), isolateSpawns: 'yes' } as unknown as CanvasData
+    expect(deserializeCanvas(data).isolateSpawns).toBe(false)
+  })
+})
+
+describe('the check command', () => {
+  it('round-trips', () => {
+    const back = deserializeCanvas(
+      JSON.parse(JSON.stringify(serializeCanvas({ ...snapshot([]), checkCommand: 'bun run test' }))),
+    )
+    expect(back.checkCommand).toBe('bun run test')
+  })
+
+  it('is empty for a canvas saved before checks existed, so nothing runs', () => {
+    const data = { ...serializeCanvas(snapshot([])), checkCommand: undefined }
+    expect(deserializeCanvas(data).checkCommand).toBe('')
+  })
+
+  it('refuses a value that is not a string', () => {
+    // This one executes. A hand-edited file must not be able to make it
+    // anything other than a command the user typed.
+    const data = { ...serializeCanvas(snapshot([])), checkCommand: 42 } as unknown as CanvasData
+    expect(deserializeCanvas(data).checkCommand).toBe('')
+  })
+})
+
+describe('worktree nodes', () => {
+  const folder = (id: string, data: Record<string, unknown>) =>
+    ({ id, type: 'folder', position: { x: 0, y: 0 }, data: { folderId: id, ...data } }) as never
+
+  it('keeps which branch a checkout is, so a reopened canvas still says who is who', () => {
+    const node = folder('f1', {
+      path: '/repo.worktrees/reviewer',
+      worktree: { branch: 'wt/reviewer', repo: '/repo' },
+    })
+    const back = deserializeCanvas(
+      JSON.parse(JSON.stringify(serializeCanvas(snapshot([node])))),
+    )
+    const saved = back.nodes.find((n) => n.id === 'f1')
+    expect(saved?.type === 'folder' && saved.data.worktree).toEqual({
+      branch: 'wt/reviewer',
+      repo: '/repo',
+    })
+  })
+
+  it('drops one that was never cut', () => {
+    // A half-typed branch name is an intention, not a directory.
+    const draft = folder('f2', { path: '', draft: true, worktree: { branch: '', repo: '/repo' } })
+    const data = serializeCanvas(snapshot([draft]))
+    expect(data.nodes.find((n) => n.id === 'f2')).toBeUndefined()
+  })
+})
+
+describe('guards', () => {
+  it('round-trips what this canvas holds back', () => {
+    const back = deserializeCanvas(
+      JSON.parse(JSON.stringify(serializeCanvas({ ...snapshot([]), guards: ['push', 'discard'] }))),
+    )
+    expect(back.guards).toEqual(['push', 'discard'])
+  })
+
+  it('holds nothing back for a canvas saved before guards existed', () => {
+    const data = { ...serializeCanvas(snapshot([])), guards: undefined }
+    expect(deserializeCanvas(data).guards).toEqual([])
+  })
+
+  it('drops anything that is not a rule name', () => {
+    // A value this build cannot enforce would read as a guard that is on
+    // while nothing checks it.
+    const data = { ...serializeCanvas(snapshot([])), guards: ['push', 7, null] } as unknown as CanvasData
+    expect(deserializeCanvas(data).guards).toEqual(['push'])
   })
 })

@@ -67,6 +67,8 @@ function Stat({
 export function AppBar({ onOpenPalette }: { onOpenPalette: () => void }) {
   const nodes = useStore((s) => s.nodes)
   const planning = useStore((s) => s.planning)
+  const isolateSpawns = useStore((s) => s.isolateSpawns)
+  const setIsolateSpawns = useStore((s) => s.setIsolateSpawns)
   const autoTidy = useStore((s) => s.autoTidy)
   const togglePlanning = useStore((s) => s.togglePlanning)
   const toggleAutoTidy = useStore((s) => s.toggleAutoTidy)
@@ -109,7 +111,7 @@ export function AppBar({ onOpenPalette }: { onOpenPalette: () => void }) {
       // Every non-interactive child carries the attribute too: the region is
       // matched against the element actually under the pointer, so a bare
       // <span> on top of the header swallows the drag.
-      className="flex h-9 shrink-0 items-center gap-3 border-b border-line bg-panel pr-3 pl-[86px] select-none"
+      className="flex h-10 shrink-0 items-center gap-3 bg-transparent pr-3 pl-[86px] select-none"
     >
       <span className="font-mono text-[12.5px] tracking-tight text-fg" data-tauri-drag-region>
         canvas<span className="font-light text-fg-subtle">trator</span>
@@ -184,6 +186,20 @@ export function AppBar({ onOpenPalette }: { onOpenPalette: () => void }) {
           }
         >
           {planning ? 'planning' : 'auto-run'}
+        </button>
+        <button
+          onClick={() => setIsolateSpawns(!isolateSpawns)}
+          className={cn(
+            'rounded px-1.5 py-0.5 font-mono text-[10.5px] hover:bg-surface hover:text-fg',
+            isolateSpawns ? 'text-fg-muted' : 'text-fg-faint',
+          )}
+          title={
+            isolateSpawns
+              ? 'Each new agent gets its own git worktree, so parallel work cannot collide. Click to share one directory instead.'
+              : 'New agents share one working directory — parallel edits can collide. Click to give each its own git worktree.'
+          }
+        >
+          {isolateSpawns ? 'isolated' : 'shared'}
         </button>
         <button
           onClick={toggleAutoTidy}

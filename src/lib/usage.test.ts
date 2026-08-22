@@ -7,7 +7,9 @@ import {
   contextUse,
   fmtTokens,
   fmtUsd,
+  planBand,
   spendByAgent,
+  untilReset,
   type SessionLike,
 } from './usage'
 
@@ -163,5 +165,40 @@ describe('spendByAgent', () => {
 
   it('is empty for a canvas with no agents', () => {
     expect(spendByAgent([])).toEqual([])
+  })
+})
+
+describe('untilReset', () => {
+  const now = Date.parse('2026-08-21T00:00:00Z')
+
+  it('counts minutes inside the last hour', () => {
+    expect(untilReset('2026-08-21T00:42:00Z', now)).toBe('42m')
+  })
+
+  it('counts hours and minutes for a session window', () => {
+    expect(untilReset('2026-08-21T03:12:00Z', now)).toBe('3h 12m')
+    expect(untilReset('2026-08-21T03:00:00Z', now)).toBe('3h')
+  })
+
+  it('counts days for a weekly window', () => {
+    expect(untilReset('2026-08-26T04:00:00Z', now)).toBe('5d 4h')
+    expect(untilReset('2026-08-26T00:00:00Z', now)).toBe('5d')
+  })
+
+  it('says now rather than a negative countdown', () => {
+    expect(untilReset('2026-08-20T23:00:00Z', now)).toBe('now')
+  })
+
+  it('has nothing to say about a window that has never started', () => {
+    expect(untilReset(null, now)).toBeNull()
+    expect(untilReset('not a date', now)).toBeNull()
+  })
+})
+
+describe('planBand', () => {
+  it('turns at the same places a context window does', () => {
+    expect(planBand(10)).toBe('calm')
+    expect(planBand(80)).toBe('warm')
+    expect(planBand(95)).toBe('hot')
   })
 })

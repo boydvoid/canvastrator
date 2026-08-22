@@ -9,6 +9,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::env;
+use crate::guard;
 use crate::mcp::McpServer;
 use crate::event::{AgentEvent, SessionEvent};
 use crate::providers::{Effort, Permission, Provider, TurnArgs};
@@ -38,6 +39,11 @@ pub struct TurnRequest {
     /// or image file nodes wired into the session.
     #[serde(default)]
     pub images: Vec<String>,
+    /// Operations this canvas refuses to let the agent take unasked — see
+    /// `guard.rs`. Empty means nothing is held back, which is the default and
+    /// what every turn did before guards existed.
+    #[serde(default)]
+    pub guards: Vec<String>,
 }
 
 #[derive(Default)]
@@ -111,11 +117,25 @@ pub async fn run_turn(
         req.permission
     );
 
+    // The guard shims go ahead of everything on PATH: `git` inside this agent
+    // is the canvas's wrapper, which refuses what this canvas is guarding and
+    // hands everything else to the real binary. Laid down per turn so a rule
+    // changed between turns takes effect on the next one.
+    let path = match guard::shim_dir(&app) {
+        Ok(dir) if !req.guards.is_empty() => format!("{}:{}", dir.display(), env::user_path()),
+        // Nothing guarded, or the shim could not be written: the agent runs
+        // with the PATH it always had rather than not at all.
+        _ => env::user_path().to_string(),
+    };
+    let allow = guard::allow_file(&app, &req.session_id).unwrap_or_default();
+
     let mut child = Command::new(&exe)
         .args(&args)
         .current_dir(&req.cwd)
         // The agent needs the user's real PATH to run cargo, bun, git, make…
-        .env("PATH", env::user_path())
+        .env("PATH", path)
+        .env("GT_GUARD_RULES", req.guards.join(","))
+        .env("GT_GUARD_ALLOW", allow)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

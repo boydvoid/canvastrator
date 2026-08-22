@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   BELL_KINDS,
+  checkTone,
   elapsed,
   isBellKind,
   KIND_LABEL,
@@ -63,16 +64,19 @@ describe('stateBar', () => {
     expect(stateBar({ working: 0, needsYou: 0, landed: 0, failed: 0 })).toBeNull()
   })
 
-  it('folds failures in with questions and sums to one', () => {
+  it('gives every state its own segment and sums to one', () => {
     const bar = stateBar({ working: 1, needsYou: 1, landed: 2, failed: 1 })!
-    expect(bar).toHaveLength(3)
+    expect(bar).toHaveLength(4)
     expect(bar.reduce((a, seg) => a + seg.fraction, 0)).toBeCloseTo(1)
-    expect(bar.find((seg) => seg.tone === 'danger')?.fraction).toBeCloseTo(0.4)
+    // A question is not a failure: they are drawn apart because one wants an
+    // answer and the other wants a rerun.
+    expect(bar.find((seg) => seg.tone === 'attn')?.fraction).toBeCloseTo(0.2)
+    expect(bar.find((seg) => seg.tone === 'danger')?.fraction).toBeCloseTo(0.2)
   })
 
   it('drops segments with nothing in them', () => {
     const bar = stateBar({ working: 2, needsYou: 0, landed: 0, failed: 0 })!
-    expect(bar).toEqual([{ tone: 'provider', fraction: 1 }])
+    expect(bar).toEqual([{ tone: 'work', fraction: 1 }])
   })
 })
 
@@ -132,6 +136,8 @@ describe('toneColor', () => {
     expect(toneColor('provider', 'codex')).toBe('var(--color-codex)')
     expect(toneColor('provider')).toBe('var(--color-fg-subtle)')
     expect(toneColor('danger')).toBe('var(--color-danger)')
+    expect(toneColor('work')).toBe('var(--color-work)')
+    expect(toneColor('attn')).toBe('var(--color-attn)')
   })
 })
 
@@ -155,5 +161,14 @@ describe('runSince', () => {
 
   it('is null when nothing has happened', () => {
     expect(runSince([])).toBeNull()
+  })
+})
+
+describe('checkTone', () => {
+  it('colours a verdict by what it says, not by its kind', () => {
+    expect(checkTone('checks pass in 4.2s')).toBe('live')
+    expect(checkTone('checks fail (exit 1)')).toBe('danger')
+    // A check that could not run is not a passing check.
+    expect(checkTone('checks could not run — no such command')).toBe('danger')
   })
 })

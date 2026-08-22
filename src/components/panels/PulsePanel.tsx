@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'react'
 import { useReactFlow } from '@xyflow/react'
-import { Activity } from 'lucide-react'
+import { Activity, CircleAlert } from 'lucide-react'
 import { FloatingPanel } from '@/components/panels/FloatingPanel'
+import { lastSaid, questionTail } from '@/lib/asking'
 import {
+  checkTone,
   elapsed,
   KIND_LABEL,
   KIND_TONE,
-  nowSentence,
   pulseNow,
   runSince,
   stateBar,
   toneColor,
+  type PulseNow,
 } from '@/lib/pulse'
 import { useStore, type GtNode } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -26,15 +28,91 @@ function useTick(live: boolean) {
   }, [live])
 }
 
+/**
+ * The three counts, as a row you read left to right.
+ *
+ * This was one sentence — "3 working · 1 needs you · 2 landed" — which reads
+ * fine and scans badly: the numbers are the part you are looking for and they
+ * were set in the same weight as the words between them. Each count now
+ * carries the colour its segment takes in the bar underneath, so the bar needs
+ * no legend of its own.
+ */
+function Counts({ now, since }: { now: PulseNow; since: number | null }) {
+  const parts = [
+    { n: now.working, label: 'working', tone: 'work' as const },
+    { n: now.needsYou, label: 'needs you', tone: 'attn' as const },
+    { n: now.failed, label: 'failed', tone: 'danger' as const },
+    { n: now.landed, label: 'landed', tone: 'live' as const },
+  ].filter((p) => p.n > 0)
+
+  return (
+    <div className="flex min-w-0 items-center gap-3.5">
+      {parts.length === 0 ? (
+        <span className="font-slab text-[15px] leading-none font-medium text-fg-muted">
+          nothing running
+        </span>
+      ) : (
+        parts.map((p) => (
+          <span key={p.label} className="flex shrink-0 items-center gap-1.5">
+            <span
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ background: toneColor(p.tone) }}
+            />
+            <span className="font-slab text-[17px] leading-none font-medium text-fg-strong tabular-nums">
+              {p.n}
+            </span>
+            <span className="font-mono text-[10px] text-fg-subtle">{p.label}</span>
+          </span>
+        ))
+      )}
+      {since != null && (
+        <span className="ml-auto shrink-0 font-mono text-[9px] text-fg-faint">
+          {elapsed(since)} in
+        </span>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The one thing on the canvas that has stopped and is waiting for you.
+ *
+ * A question is the only state the canvas cannot get itself out of, and in a
+ * feed of thirty entries it looked exactly like the twenty-nine that need
+ * nothing. So it comes out of the feed and sits above it, in the only colour
+ * this panel uses as a ground, with the button that answers it.
+ */
+function NeedsYou({ name, question, onGo }: { name: string; question: string; onGo: () => void }) {
+  return (
+    <div className="flex items-center gap-2.5 border-l-2 border-[var(--color-attn)] bg-[var(--color-attn-dim)] px-3.5 py-2.5">
+      <CircleAlert size={12} className="shrink-0 text-[var(--color-attn)]" />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="truncate font-mono text-[10px] text-fg">{name} is waiting on you</span>
+        <span className="line-clamp-2 font-mono text-[9px] leading-snug text-fg-faint">
+          {question}
+        </span>
+      </span>
+      <button
+        onClick={onGo}
+        className="shrink-0 rounded-md bg-[var(--color-attn)] px-2.5 py-[5px] font-mono text-[10px] text-canvas hover:brightness-110"
+      >
+        decide
+      </button>
+    </div>
+  )
+}
+
 function Entry({ event, onGo }: { event: Notification; onGo: () => void }) {
-  const tone = KIND_TONE[event.kind]
+  // A check is the one kind whose colour is its content: passing and failing
+  // are the same event and opposite news.
+  const tone = event.kind === 'check' ? checkTone(event.headline) : KIND_TONE[event.kind]
   const color = toneColor(tone, event.provider)
   return (
     <button
       onClick={onGo}
-      className="flex w-full min-w-0 items-start gap-2 border-b border-line-soft px-3 py-2 text-left last:border-b-0 hover:bg-surface"
+      className="flex w-full min-w-0 items-start gap-2.5 border-b border-line-soft px-3.5 py-2.5 text-left last:border-b-0 hover:bg-surface-2"
     >
-      <span className="w-9 shrink-0 pt-[3px] text-right font-mono text-[9px] text-fg-faint tabular-nums">
+      <span className="w-[34px] shrink-0 pt-[3px] text-right font-mono text-[9px] text-fg-faint tabular-nums">
         {elapsed(event.ts)}
       </span>
       <span
@@ -93,6 +171,9 @@ export function PulsePanel() {
   )
   const bar = stateBar(now)
   const since = runSince(feed)
+  // The banner names one agent, not all of them: two questions at once is a
+  // queue, and a queue belongs in Decisions where you can see the rest of it.
+  const asking = sessions.find((n) => n.data.awaitingUser)
   useTick(now.working > 0)
 
   const go = (nodeId: string) => {
@@ -125,35 +206,28 @@ export function PulsePanel() {
         </span>
       }
     >
-      <div className="flex shrink-0 flex-col gap-2 px-3 pt-2.5 pb-3">
-        <div className="flex min-w-0 items-end gap-2">
-          <span className="min-w-0 flex-1 truncate font-slab text-[14px] leading-tight font-medium text-fg">
-            {nowSentence(now)}
-          </span>
-          {since != null && (
-            <span className="shrink-0 font-mono text-[9px] text-fg-faint">
-              {elapsed(since)} of history
-            </span>
-          )}
-        </div>
+      <div className="flex shrink-0 flex-col gap-2.5 px-3.5 pt-3 pb-3.5">
+        <Counts now={now} since={since} />
         {bar && (
-          <div className="flex h-1 gap-0.5 overflow-hidden rounded-sm">
+          <div className="flex h-[5px] gap-0.5 overflow-hidden rounded-sm">
             {bar.map((seg, i) => (
               <span
                 key={i}
-                className="h-full rounded-[1px]"
-                style={{
-                  width: `${seg.fraction * 100}%`,
-                  // The working segment takes no single agent's accent —
-                  // several providers may be running at once — so it takes the
-                  // canvas-neutral live colour rather than picking a winner.
-                  background: toneColor(seg.tone === 'provider' ? 'live' : seg.tone),
-                }}
+                className="h-full rounded-[2px]"
+                style={{ width: `${seg.fraction * 100}%`, background: toneColor(seg.tone) }}
               />
             ))}
           </div>
         )}
       </div>
+
+      {asking && (
+        <NeedsYou
+          name={asking.data.name}
+          question={questionTail(lastSaid(asking.data.messages))}
+          onGo={() => go(asking.id)}
+        />
+      )}
 
       <div className="max-h-64 overflow-y-auto overscroll-contain border-t border-line">
         {feed.length === 0 ? (
@@ -165,7 +239,7 @@ export function PulsePanel() {
         )}
       </div>
 
-      <div className="flex shrink-0 items-center gap-2 border-t border-line bg-canvas/40 px-3 py-1.5">
+      <div className="flex shrink-0 items-center gap-2 border-t border-line bg-panel px-3.5 py-2">
         <span className="font-mono text-[9px] text-fg-faint">click an entry to fly to its node</span>
       </div>
     </FloatingPanel>

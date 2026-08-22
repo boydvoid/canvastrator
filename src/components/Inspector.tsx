@@ -1,7 +1,10 @@
-import { useMemo } from 'react'
-import { Folder, ScrollText, Trash2, Bot, Plug } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Bot, Folder, GitBranch, Plug, ScrollText, Trash2 } from 'lucide-react'
 import { EffortMenu, FolderMenu, ModelMenu } from '@/components/ChatPanel'
 import { folderRootsFor, useStore, type GtNode } from '@/lib/store'
+import { gitBranch, guardAllow, guardAllowed, guardRevoke, guardRules, type GuardRule } from '@/lib/bridge'
+import { shouldOffer } from '@/lib/compact'
+import { band, contextUse, fmtTokens } from '@/lib/usage'
 import {
   PERMISSION_HINT,
   PERMISSION_LABEL,
@@ -30,6 +33,297 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
+
+/**
+ * Give this agent its own checkout of the repository it is working in.
+ *
+ * Two agents in one directory interleave their writes, and the canvas cannot
+ * see it happen: the diff that lands is unattributable and the second agent
+ * reads files the first is halfway through changing. A worktree costs a
+ * directory and buys an agent that can be reviewed, reverted and merged on its
+ * own terms.
+ *
+ * The branch it is already on is shown rather than the button, when it has
+ * one: an agent that says `wt/reviewer` has answered the question the button
+ * was there to ask.
+ */
+function IsolateControl({ nodeId, cwd }: { nodeId: string; cwd: string | null }) {
+  const isolate = useStore((s) => s.isolateSession)
+  const [branch, setBranch] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    setError(null)
+    if (!cwd) return setBranch(null)
+    void gitBranch(cwd)
+      .then((b) => live && setBranch(b))
+      .catch(() => live && setBranch(null))
+    return () => {
+      live = false
+    }
+  }, [cwd])
+
+  const own = branch?.startsWith('wt/') === true
+
+  const run = async () => {
+    setBusy(true)
+    setError(null)
+    const out = await isolate(nodeId)
+    setBusy(false)
+    if ('error' in out) setError(out.error)
+    else setBranch(out.branch)
+  }
+
+  return (
+    <span className="flex min-w-0 flex-1 flex-col gap-1">
+      <span className="flex min-w-0 items-center gap-1.5">
+        <GitBranch size={10} className="shrink-0 text-fg-faint" />
+        <span
+          className={cn('min-w-0 flex-1 truncate font-mono text-[10px]', own ? 'text-[var(--color-live)]' : 'text-fg-muted')}
+          title={own ? 'This agent has its own checkout' : 'Shared with every other agent in this folder'}
+        >
+          {branch ?? (cwd ? 'no branch' : 'no folder')}
+        </span>
+        {!own && cwd && (
+          <button
+            onClick={() => void run()}
+            disabled={busy}
+            title="Create a git worktree for this agent and work there instead"
+            className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] text-fg-subtle hover:bg-surface hover:text-fg disabled:text-fg-faint"
+          >
+            {busy ? 'branching…' : 'isolate'}
+          </button>
+        )}
+      </span>
+      {error && (
+        <span className="font-mono text-[9px] leading-snug text-[var(--color-danger)]">{error}</span>
+      )}
+    </span>
+  )
+}
+
+
+/**
+ * The verdict, and the button that asks for one.
+ *
+ * Deliberately not hidden behind a passing state: the reason to look at an
+ * agent is often to ask again after changing something by hand, and a control
+ * that disappears when the news is good is a control you cannot find when you
+ * need it.
+ */
+function CheckControl({ nodeId }: { nodeId: string }) {
+  const command = useStore((s) => s.checkCommand)
+  const setDialog = useStore((s) => s.setCanvasDialog)
+  const run = useStore((s) => s.runCheckFor)
+  const check = useStore((s) => {
+    const n = s.nodes.find((x) => x.id === nodeId)
+    return n?.type === 'session' ? n.data.check : undefined
+  })
+
+  if (!command.trim()) {
+    return (
+      <button
+        onClick={() => setDialog('rules')}
+        className="min-w-0 flex-1 truncate text-left font-mono text-[10px] text-fg-subtle hover:text-fg-muted"
+        title="Set a command — the project's own tests — and it runs after any turn that writes"
+      >
+        not set — add one
+      </button>
+    )
+  }
+
+  const running = check?.state === 'running'
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-1.5">
+      <span
+        className={cn(
+          'min-w-0 flex-1 truncate font-mono text-[10px]',
+          check?.state === 'pass' && 'text-[var(--color-live)]',
+          check?.state === 'fail' && 'text-[var(--color-danger)]',
+          !check && 'text-fg-faint',
+          running && 'text-fg-muted',
+        )}
+        title={check?.tail || check?.error || command}
+      >
+        {running
+          ? 'running…'
+          : check?.state === 'pass'
+            ? `pass${check.ms ? ` · ${(check.ms / 1000).toFixed(1)}s` : ''}`
+            : check?.state === 'fail'
+              ? check.error
+                ? 'could not run'
+                : `fail${check.code == null ? '' : ` · exit ${check.code}`}`
+              : 'not run yet'}
+      </span>
+      <button
+        onClick={() => void run(nodeId)}
+        disabled={running}
+        title={`Run: ${command}`}
+        className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] text-fg-subtle hover:bg-surface hover:text-fg disabled:text-fg-faint"
+      >
+        {running ? '…' : 'check'}
+      </button>
+    </span>
+  )
+}
+
+
+/**
+ * How full this agent's window is, and the way out when it is nearly gone.
+ *
+ * The button appears only past the line: an offer to recycle a window that is
+ * a fifth full is noise, and noise beside a meter is how people learn to stop
+ * reading meters.
+ */
+function ContextControl({ nodeId }: { nodeId: string }) {
+  const compact = useStore((s) => s.compact)
+  const node = useStore((s) =>
+    s.nodes.find((n): n is GtNode & { type: 'session' } => n.id === nodeId && n.type === 'session'),
+  )
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (!node) return null
+  const use = contextUse({ ...node.data, id: nodeId })
+  const compactions = node.data.compactions ?? 0
+
+  const run = async () => {
+    setBusy(true)
+    setError(null)
+    const out = await compact(nodeId)
+    setBusy(false)
+    if (out) setError(out.error)
+  }
+
+  return (
+    <span className="flex min-w-0 flex-1 flex-col gap-1">
+      <span className="flex min-w-0 items-center gap-1.5">
+        <span
+          className={cn(
+            'min-w-0 flex-1 truncate font-mono text-[10px]',
+            band(use?.fraction ?? null) === 'hot' ? 'text-[var(--color-danger)]' : 'text-fg-muted',
+          )}
+          title={
+            (use?.limit
+              ? `${use.tokens.toLocaleString()} of ${use.limit.toLocaleString()} tokens in the last turn`
+              : 'The window for this model is unknown, so there is no percentage to show') +
+            (compactions > 0
+              ? `\nThis window has been recycled ${compactions} time${compactions === 1 ? '' : 's'}; the notes are on the canvas.`
+              : '')
+          }
+        >
+          {use?.fraction != null
+            ? `${Math.round(use.fraction * 100)}% full`
+            : use
+              ? `${fmtTokens(use.tokens)} carried`
+              : 'no turns yet'}
+          {/* Short enough to sit beside the percentage in a 268px panel; the
+              tooltip says what it means. */}
+          {compactions > 0 && <span className="text-fg-faint"> · ↻{compactions}</span>}
+        </span>
+        {(shouldOffer(use?.fraction) || busy) && (
+          <button
+            onClick={() => void run()}
+            disabled={busy}
+            title="Write a handover note to the canvas, then continue in a fresh window carrying only that note"
+            className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-attn)] hover:bg-surface disabled:text-fg-faint"
+          >
+            {busy ? 'compacting…' : 'compact'}
+          </button>
+        )}
+      </span>
+      {error && (
+        <span className="font-mono text-[9px] leading-snug text-[var(--color-danger)]">{error}</span>
+      )}
+    </span>
+  )
+}
+
+
+/**
+ * What this agent has been let past, and the switch that lets it.
+ *
+ * Per agent, never per canvas: allowing this one to push is not a statement
+ * about the other five, and an approval that leaked sideways would be the
+ * worst kind of surprise. Read from disk rather than from the store — the
+ * allow file is what the shim actually consults, and a checkbox that showed
+ * anything else would be describing a permission that isn't in force.
+ */
+function GuardControl({ sessionId }: { sessionId: string }) {
+  const guards = useStore((s) => s.guards)
+  const setDialog = useStore((s) => s.setCanvasDialog)
+  const [allowed, setAllowed] = useState<string[]>([])
+  const [rules, setRules] = useState<GuardRule[]>([])
+
+  useEffect(() => {
+    let live = true
+    void Promise.all([guardRules(), guardAllowed(sessionId)])
+      .then(([r, a]) => {
+        if (!live) return
+        setRules(r)
+        setAllowed(a)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [sessionId])
+
+  const toggle = async (rule: string, on: boolean) => {
+    // Optimistic, then reconciled from the file: the shim reads the file, so
+    // the file is the truth about what this agent may do.
+    setAllowed((prev) => (on ? [...prev, rule] : prev.filter((r) => r !== rule)))
+    await (on ? guardAllow(sessionId, rule) : guardRevoke(sessionId, rule)).catch(() => {})
+    await guardAllowed(sessionId)
+      .then(setAllowed)
+      .catch(() => {})
+  }
+
+  if (guards.length === 0) {
+    return (
+      <button
+        onClick={() => setDialog('rules')}
+        className="min-w-0 flex-1 truncate text-left font-mono text-[10px] text-fg-subtle hover:text-fg-muted"
+        title="Nothing is held back on this canvas. Set what to ask about in the canvas rules."
+      >
+        nothing held back
+      </button>
+    )
+  }
+
+  return (
+    <span className="flex min-w-0 flex-1 flex-wrap gap-1">
+      {guards
+        .filter((g) => rules.some((r) => r.id === g))
+        .map((g) => {
+          const on = allowed.includes(g)
+          const what = rules.find((r) => r.id === g)?.what ?? g
+          return (
+            <button
+              key={g}
+              onClick={() => void toggle(g, !on)}
+              title={
+                on
+                  ? `Allowed: this agent may ${what}. Click to hold it back again.`
+                  : `Held back: ${what} is refused before it runs. Click to allow it for this agent.`
+              }
+              className={cn(
+                'rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors',
+                on
+                  ? 'bg-[color-mix(in_oklch,var(--color-live)_20%,transparent)] text-[var(--color-live)]'
+                  : 'bg-surface-2 text-fg-subtle hover:text-fg-muted',
+              )}
+            >
+              {on ? `${g} allowed` : g}
+            </button>
+          )
+        })}
+    </span>
+  )
+}
+
 /**
  * Everything about one agent, beside that agent.
  *
@@ -51,6 +345,13 @@ export function SessionInspector({ nodeId }: { nodeId: string }) {
     s.nodes.find((n): n is GtNode & { type: 'session' } => n.id === nodeId && n.type === 'session'),
   )
   const rename = useStore((s) => s.renameSession)
+  // The directory this agent actually runs in: its primary folder if one is
+  // wired in, else whatever it was spawned with.
+  const cwd = useStore((s) => {
+    const mine = s.nodes.find((n) => n.id === nodeId)
+    if (mine?.type !== 'session') return null
+    return folderRootsFor(s.nodes, s.edges, nodeId).find((r) => r.primary)?.path ?? mine.data.cwd ?? null
+  })
   const setPermission = useStore((s) => s.setPermission)
   const removeNode = useStore((s) => s.removeNode)
 
@@ -154,6 +455,18 @@ export function SessionInspector({ nodeId }: { nodeId: string }) {
       </Field>
       <Field label="folder">
         <FolderMenu node={node} />
+      </Field>
+      <Field label="branch">
+        <IsolateControl nodeId={nodeId} cwd={cwd} />
+      </Field>
+      <Field label="check">
+        <CheckControl nodeId={nodeId} />
+      </Field>
+      <Field label="window">
+        <ContextControl nodeId={nodeId} />
+      </Field>
+      <Field label="ask before">
+        <GuardControl sessionId={d.sessionId} />
       </Field>
       <Field label="access">
         <span className="flex min-w-0 flex-wrap gap-0.5">

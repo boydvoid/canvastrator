@@ -11,7 +11,11 @@ export type CanvasAction =
   | 'skill'
   | 'terminal'
   | 'pulse'
+  | 'decisions'
+  | 'shared'
+  | 'changes'
   | 'usage'
+  | 'skills'
   | 'personas'
   | 'tidy'
   | 'rules'
@@ -31,7 +35,16 @@ const KEYS: Record<string, CanvasAction> = {
   // The three panels toggle: they are screen furniture rather than nodes, so
   // a second press of the key that showed one puts it away again.
   p: 'pulse',
+  // "c" for the call it is asking you to make: "d" is the file node and the
+  // rail's decision log already owns the word.
+  c: 'decisions',
+  n: 'changes',
+  // "a" for all of them: the board every agent reads.
+  a: 'shared',
   u: 'usage',
+  // "k" for the skill node it can also write; the node itself is on "k" too,
+  // because a shelf and the thing it shelves are the same errand.
+  i: 'skills',
   l: 'personas',
   t: 'tidy',
   g: 'rules',
@@ -47,7 +60,11 @@ export const SHORTCUT_LABEL: Record<CanvasAction, string> = {
   skill: 'K',
   terminal: 'E',
   pulse: 'P',
+  decisions: 'C',
+  shared: 'A',
+  changes: 'N',
   usage: 'U',
+  skills: 'I',
   personas: 'L',
   tidy: 'T',
   rules: 'G',

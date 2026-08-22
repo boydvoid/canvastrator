@@ -15,7 +15,7 @@
 import { parsePattern, pattern, type PatternId } from './patterns'
 import { parsePlan } from './plan'
 import { parsePersonaDefinitions } from './persona-parse'
-import type { Message, Plan, PlanStep } from './types'
+import type { Message, PlanStep } from './types'
 
 export type Decision =
   /** What the user asked for. Starts each turn. */
@@ -48,14 +48,13 @@ const gist = (text: string, max = 220) => {
 /**
  * The decision path for one agent's conversation, oldest first.
  *
- * `plan` is the live plan, used only to colour in the steps it still holds:
- * the transcript says what was proposed, and the plan says what became of it.
- * Steps from earlier turns keep no state, because nothing kept it — showing
- * them as pending would be inventing a fact.
+ * `live` is every step this agent's plans still hold, used only to colour in
+ * the ones the transcript proposed: the transcript says what was asked for,
+ * and the plans say what became of it. Steps from earlier turns keep no state,
+ * because nothing kept it — showing them as pending would be inventing a fact.
  */
-export function decisionsFor(messages: Message[], plan: Plan | null | undefined): Decision[] {
+export function decisionsFor(messages: Message[], live: PlanStep[] = []): Decision[] {
   const out: Decision[] = []
-  const live = plan?.steps ?? []
 
   for (const m of messages) {
     if (m.role === 'user') {

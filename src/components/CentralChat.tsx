@@ -190,7 +190,7 @@ function OrchestraMenu({ fallback }: { fallback: Provider }) {
  * not scrolled to, not clickable.
  */
 const BOX =
-  'pointer-events-auto absolute right-4 bottom-4 z-20 flex max-h-[min(34rem,calc(100%-2rem))] w-[min(26rem,calc(100%-2rem))] flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-xl backdrop-blur'
+  'pointer-events-auto absolute right-4 bottom-4 z-30 flex max-h-[min(34rem,calc(100%-2rem))] w-[min(26rem,calc(100%-2rem))] flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-xl backdrop-blur'
 
 export function CentralChat() {
   const nodes = useStore((s) => s.nodes)

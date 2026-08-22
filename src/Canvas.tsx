@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
@@ -11,6 +11,8 @@ import { CanvasDialogs, CanvasMenuItems } from '@/components/CanvasBar'
 import { AppBar } from '@/components/AppBar'
 import { CommandPalette } from '@/components/CommandPalette'
 import { LeftRail } from '@/components/LeftRail'
+import { DeskBar } from '@/components/Desk'
+import { routeEvent, useDesk } from '@/lib/desk'
 import { SpawnRing, type SpawnKind } from '@/components/SpawnRing'
 import { ZoomControls } from '@/components/ZoomControls'
 import { edgeTypes } from '@/components/edges'
@@ -23,10 +25,11 @@ import { FolderNode } from '@/components/nodes/FolderNode'
 import { McpNode } from '@/components/nodes/McpNode'
 import { McpToolNode } from '@/components/nodes/McpToolNode'
 import { SessionNode } from '@/components/nodes/SessionNode'
+import { PlanAddNode } from '@/components/nodes/PlanAddNode'
 import { PlanStepNode } from '@/components/nodes/PlanStepNode'
 import { ShapeNode } from '@/components/nodes/ShapeNode'
 import { TerminalNode } from '@/components/nodes/TerminalNode'
-import { LandingNode } from '@/components/nodes/LandingNode'
+import { ChangesNode } from '@/components/nodes/ChangesNode'
 import { SkillNode } from '@/components/nodes/SkillNode'
 import {
   ContextMenu,
@@ -48,7 +51,7 @@ import {
   terminalLive,
 } from '@/lib/bridge'
 import {
-  newCanvas,
+  clearCanvas,
   beginLaunchRestore,
   restoreLastCanvas,
   watchCanvas,
@@ -57,7 +60,7 @@ import {
 } from '@/lib/canvas'
 import { pipeTerminals } from '@/lib/terminals'
 import { SHORTCUT_LABEL, keyToCanvasAction, keyToDensity, shouldIgnoreShortcut } from '@/lib/shortcuts'
-import { useStore, type GtNode } from '@/lib/store'
+import { CanvasStoreContext, useInViewRef, useStore, type GtNode } from '@/lib/store'
 import { PROVIDER_ACCENT, PROVIDER_LABEL, type Provider } from '@/lib/types'
 
 const nodeTypes: NodeTypes = {
@@ -68,23 +71,44 @@ const nodeTypes: NodeTypes = {
   mcp: McpNode,
   mcptool: McpToolNode,
   planstep: PlanStepNode,
+  planadd: PlanAddNode,
   shape: ShapeNode,
-  landing: LandingNode,
+  changes: ChangesNode,
   terminal: TerminalNode,
 }
 
 /** The floating panels, as the right-click menu names them. */
 const PANEL_ITEMS = [
   { key: 'pulse', label: 'Pulse' },
+  { key: 'decisions', label: 'Decisions' },
+  { key: 'shared', label: 'Shared context' },
+  { key: 'changes', label: 'Changes' },
   { key: 'usage', label: 'Usage' },
+  { key: 'skills', label: 'Skills' },
   { key: 'personas', label: 'personas' },
 ] as const
 
 function Surface() {
+  // Autosave and auto-tidy belong to a canvas, not to the app: a canvas
+  // running in the background is still being edited by its agents, and a
+  // watcher wired to whichever canvas is on screen would have saved one of
+  // them and quietly dropped the rest.
+  const mine = useContext(CanvasStoreContext)
+  const inView = useInViewRef()
+  useEffect(() => {
+    if (!mine) return
+    const stopSaving = watchCanvas(mine)
+    const stopTidying = watchLayout(mine)
+    return () => {
+      stopSaving()
+      stopTidying()
+    }
+  }, [mine])
+
   const nodes = useStore((s) => s.nodes)
   const panels = useStore((s) => s.panels)
   const edges = useStore((s) => s.edges)
-  const plan = useStore((s) => s.plan)
+  const plans = useStore((s) => s.plans)
   const providers = useStore((s) => s.providers)
   const addMcp = useStore((s) => s.addMcp)
   const cwd = useStore((s) => s.cwd)
@@ -108,7 +132,7 @@ function Surface() {
     addSkill,
     addFolder,
     addFile,
-    addLanding,
+    addChanges,
     addTerminal,
   } =
     useStore.getState()
@@ -195,12 +219,12 @@ function Surface() {
   /**
    * The plan drawn as the flow it describes, merged in rather than stored.
    *
-   * Deriving it here keeps the plan the only copy: the panel and the canvas
+   * Deriving it here keeps the plans the only copy: the panel and the canvas
    * are two views of one list, and there is no second place for a step's state
-   * to be wrong. It also means nothing to clean up — discarding the plan takes
-   * the nodes with it.
+   * to be wrong. It also means nothing to clean up — discarding a plan takes
+   * its nodes with it.
    */
-  const planned = useMemo(() => planFlow(plan, nodes), [plan, nodes])
+  const planned = useMemo(() => planFlow(plans, nodes), [plans, nodes])
 
   const shownNodes = useMemo(
     () => [
@@ -318,7 +342,10 @@ function Surface() {
         // The panels are screen furniture, not nodes: the key that puts one on
         // screen takes it away again.
         case 'pulse':
+        case 'decisions':
+        case 'changes':
         case 'usage':
+        case 'skills':
         case 'personas':
           st.togglePanel(action)
           break
@@ -333,9 +360,14 @@ function Surface() {
           break
       }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [dropScreen, fitView, paletteOpen, screenToFlowPosition, spawnAt])
+    // Only the canvas in view answers the keyboard — the others are mounted
+    // and running, not listening. See `useInView`.
+    const guarded = (e: KeyboardEvent) => {
+      if (inView.current) onKey(e)
+    }
+    window.addEventListener('keydown', guarded)
+    return () => window.removeEventListener('keydown', guarded)
+  }, [dropScreen, fitView, inView, paletteOpen, screenToFlowPosition, spawnAt])
 
 
   /**
@@ -369,6 +401,15 @@ function Surface() {
         case 'skill':
           st.addSkill(at)
           break
+        case 'worktree':
+          // Refused rather than opening a picker: a worktree is cut *from* a
+          // repository, and a canvas with no folder on it has none to cut.
+          if (!st.addWorktree(at)) {
+            useStore.setState({
+              canvasError: 'Put a folder on the canvas first — a worktree is cut from a repository.',
+            })
+          }
+          break
         case 'mcp':
           // MCP servers have to be discovered before one can be chosen, and
           // that is a list rather than a slot — the ring hands it to the menu
@@ -376,30 +417,31 @@ function Surface() {
           loadMcp()
           setMenuAt(screen)
           break
-        case 'landing':
-          st.addLanding(at)
+        case 'changes':
+          st.addChanges(at)
           break
       }
     },
     [loadMcp, screenToFlowPosition, spawnAt],
   )
 
-  /** The rail's module button, which has no cursor to land under. */
-  const addModule = useCallback(() => {
-    const id = useStore.getState().addLanding(screenToFlowPosition(dropScreen()))
-    setTimeout(() => fitView({ nodes: [{ id }], duration: 380, maxZoom: 1, padding: 0.5 }), 40)
-  }, [dropScreen, fitView, screenToFlowPosition])
-
   return (
     <div className="flex h-full w-full flex-col">
       <AppBar onOpenPalette={() => setPaletteOpen(true)} />
 
-      {/* One rail, and the canvas. The drawer the rail opens floats over the
-          canvas rather than taking a column from it — see `LeftRail`. */}
-      <div className="relative flex min-h-0 flex-1">
-        <LeftRail onAddLanding={addModule} />
+      {/* One rail, and the canvas — each its own panel, inset from the window
+          and from each other, with the desk showing through between them. The
+          gap is doing work: it is what separates the chrome you act *with*
+          from the canvas you act *on*, which a shared edge only implied.
+          The drawer the rail opens floats over the canvas rather than taking a
+          column from it — see `LeftRail`. */}
+      <div className="relative flex min-h-0 flex-1 gap-2 px-2 pb-2">
+        <LeftRail />
 
-        <div className="relative min-w-0 flex-1 overflow-hidden bg-canvas" ref={wrapper}>
+        <div
+          className="gt-panel relative min-w-0 flex-1 overflow-hidden rounded-2xl border border-line bg-canvas"
+          ref={wrapper}
+        >
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <div
@@ -528,8 +570,21 @@ function Surface() {
               Skill
               <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.skill}</span>
             </ContextMenuItem>
-            <ContextMenuItem onSelect={() => addLanding(screenToFlowPosition(menuAt))}>
-              Landing
+            <ContextMenuItem
+              onSelect={() => {
+                const st = useStore.getState()
+                if (!st.addWorktree(screenToFlowPosition(menuAt))) {
+                  useStore.setState({
+                    canvasError:
+                      'Put a folder on the canvas first — a worktree is cut from a repository.',
+                  })
+                }
+              }}
+            >
+              Worktree
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => addChanges(screenToFlowPosition(menuAt))}>
+              Changes
             </ContextMenuItem>
             <ContextMenuItem
               onSelect={() => addTerminal(screenToFlowPosition(menuAt))}
@@ -579,7 +634,7 @@ function Surface() {
               Tidy everything
               <span className="font-mono text-[10px] text-fg-faint">{SHORTCUT_LABEL.tidy}</span>
             </ContextMenuItem>
-            <ContextMenuItem onSelect={() => newCanvas()}>Clear canvas</ContextMenuItem>
+            <ContextMenuItem onSelect={() => clearCanvas()}>Clear canvas</ContextMenuItem>
           </ContextMenuContent>
         </ContextMenu>
 
@@ -614,22 +669,34 @@ function Surface() {
 }
 
 export function Canvas() {
-  const setProviders = useStore((s) => s.setProviders)
-  const setCwd = useStore((s) => s.setCwd)
-  const applyEvent = useStore((s) => s.applyEvent)
-
+  /**
+   * Launch, once.
+   *
+   * These used to be bound as reactive values off the store — and once the
+   * store became one-per-canvas, `useStore` started answering for whichever
+   * canvas was in view. Every switch handed this effect a different
+   * `applyEvent`, so it tore down and ran again: the launch restore reopened
+   * the last-remembered canvas and dragged the view straight back to it. You
+   * clicked another canvas, saw it for a frame, and bounced. Nothing here is
+   * about a particular canvas, so nothing here may depend on which one is
+   * showing — the store is read at call time instead.
+   */
   useEffect(() => {
-    void detectProviders().then(setProviders)
+    void detectProviders().then((p) => useStore.getState().setProviders(p))
     void useStore.getState().initLibrary()
     // `finally`, not `then`: a default cwd that fails to resolve used to take
     // the restore down with it — the chain died, the canvas never reopened,
     // and the next node minted a new one.
     beginLaunchRestore()
     void defaultCwd()
-      .then(setCwd)
+      .then((c) => useStore.getState().setCwd(c))
       .catch(() => {})
       .finally(() => void restoreLastCanvas())
-    const un = onSessionEvent((e) => applyEvent(e.sessionId, e.event))
+    // Routed by session rather than handed to the canvas in view: an agent's
+    // reply belongs to the canvas its node is on, and that canvas is often not
+    // the one on screen. This is the line that makes leaving work running mean
+    // something.
+    const un = onSessionEvent((e) => routeEvent(e.sessionId, e.event))
     // One listener for every terminal on the canvas, started here so a shell
     // that outlives its view still has somewhere to put its output.
     const stopTerminals = pipeTerminals()
@@ -646,21 +713,56 @@ export function Canvas() {
         }
       })
       .catch(() => {})
-    const stopWatching = watchCanvas()
-    const stopLayout = watchLayout()
     const stopChime = watchCompletion()
     return () => {
       void un.then((f) => f())
       stopTerminals()
-      stopWatching()
-      stopLayout()
       stopChime()
     }
-  }, [setProviders, setCwd, applyEvent])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- launch, once.
+  }, [])
+
+  return <Desk />
+}
+
+/**
+ * Every open canvas, side by side, with the one you are looking at in view.
+ *
+ * The strip slides rather than scrolls: React Flow owns the wheel inside a
+ * canvas — that is its zoom — so moving between canvases is the dots or the
+ * keyboard, and the transform is what makes the move read as travelling along
+ * a row rather than as a screen being replaced.
+ *
+ * All of them stay mounted. That is the feature, not an oversight: the canvas
+ * two along is running its agents, drawing its files and advancing its plans
+ * while you work here, and unmounting it to save a few frames would put back
+ * exactly the behaviour this replaced.
+ */
+function Desk() {
+  const strip = useDesk((d) => d.strip)
+  const at = useDesk((d) => d.at)
 
   return (
-    <ReactFlowProvider>
-      <Surface />
-    </ReactFlowProvider>
+    <div className="relative h-full w-full overflow-hidden bg-ground">
+      <div
+        className="flex h-full w-full transition-transform duration-300 ease-out"
+        style={{ transform: `translateX(-${at * 100}%)` }}
+      >
+        {strip.map((seat) => (
+          // Each canvas is a whole workspace, its own app bar included — the
+          // name, the spend and the counters on that bar are facts about one
+          // canvas, and a single bar over the strip could only ever report on
+          // one of them.
+          <div key={seat.key} className="h-full w-full shrink-0">
+            <CanvasStoreContext.Provider value={seat.store}>
+              <ReactFlowProvider>
+                <Surface />
+              </ReactFlowProvider>
+            </CanvasStoreContext.Provider>
+          </div>
+        ))}
+      </div>
+      <DeskBar />
+    </div>
   )
 }

@@ -22,6 +22,12 @@ export type CanvasDoc = {
   id: string
   name: string
   updatedAt: number
+  /**
+   * When the canvas was first written. Optional on the way in — the Rust side
+   * fills it from the file so a save can't drop it — and always present on the
+   * way out.
+   */
+  createdAt?: number
   version: number
   data: CanvasData
 }
@@ -31,6 +37,8 @@ export type CanvasMeta = {
   id: string
   name: string
   updatedAt: number
+  /** What the list is ordered by. Fixed for the life of the canvas. */
+  createdAt: number
   version: number
   nodes: number
 }
@@ -58,9 +66,22 @@ export type CanvasData = {
   notifications?: Notification[]
   /** Whether the orchestrator proposes work rather than starting it. */
   planning?: boolean
+  /** Whether each new agent gets its own git worktree. */
+  isolateSpawns?: boolean
+  /** The command that decides whether this canvas's work is any good. */
+  checkCommand?: string
+  /** Operations this canvas holds back until the user allows them. */
+  guards?: string[]
   /** Which models the user wants this canvas's orchestrator reaching for. */
   orchestra?: OrchestraPrefs
-  /** A plan the user hasn't finished with. */
+  /**
+   * Plans the user hasn't finished with.
+   *
+   * `plan` is what canvases saved when one was all a canvas could hold. It is
+   * still read, because a file written last week is not wrong — it just knew
+   * of one.
+   */
+  plans?: Plan[]
   plan?: Plan | null
   /** Which floating readouts are showing, and which are folded to a header. */
   panels?: Panels
@@ -77,7 +98,11 @@ export type CanvasSnapshot = {
   globalRules: string
   notifications: Notification[]
   planning: boolean
-  plan: Plan | null
+  /** Optional for the same reason as `panels`: a partial test snapshot. */
+  isolateSpawns?: boolean
+  checkCommand?: string
+  guards?: string[]
+  plans: Plan[]
   /**
    * Optional for the same reason as `orchestra`: a partial snapshot built by a
    * test predates the field, and absent means "however the panels start".
@@ -136,7 +161,11 @@ function settleTerminal(data: Extract<GtNode, { type: 'terminal' }>['data']) {
 }
 
 export function serializeCanvas(s: CanvasSnapshot): CanvasData {
-  const nodes: SavedNode[] = s.nodes.map((n) => ({
+  // A worktree that was named but never cut is a half-typed intention, not a
+  // directory: saving it would restore a canvas with a text field waiting on
+  // a branch nobody remembers wanting.
+  const live = s.nodes.filter((n) => !(n.type === 'folder' && n.data.draft))
+  const nodes: SavedNode[] = live.map((n) => ({
     id: n.id,
     type: n.type,
     position: n.position,
@@ -175,19 +204,17 @@ export function serializeCanvas(s: CanvasSnapshot): CanvasData {
     globalRules: s.globalRules ?? '',
     notifications: s.notifications ?? [],
     planning: s.planning ?? true,
+    isolateSpawns: s.isolateSpawns ?? false,
+    checkCommand: s.checkCommand ?? '',
+    guards: s.guards ?? [],
     orchestra: { ...DEFAULT_ORCHESTRA, ...(s.orchestra ?? {}) },
-    // A step that was mid-flight when the app closed is pending again: its
-    // agent is gone with the process, and a step stuck on "running" for ever
-    // is worse than one the user has to approve twice.
     panels: { ...DEFAULT_PANELS, ...(s.panels ?? {}) },
-    plan: s.plan
-      ? {
-          ...s.plan,
-          steps: s.plan.steps.map((st) =>
-            st.state === 'running' ? { ...st, state: 'pending' as const } : st,
-          ),
-        }
-      : null,
+    plans: s.plans.map((p) => ({
+      ...p,
+      steps: p.steps.map((st) =>
+        st.state === 'running' ? { ...st, state: 'pending' as const } : st,
+      ),
+    })),
   }
 }
 
@@ -278,6 +305,14 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
       delete node.width
       delete node.height
     }
+    // The Changes module was called Landing. A canvas saved under the old
+    // name carries `landing`, which no node type answers to any more, so it
+    // would restore as a blank box; the id it holds is renamed with it.
+    if ((node.type as string) === 'landing') {
+      node.type = 'changes'
+      const d = node.data as { landingId?: string; changesId?: string } | undefined
+      if (d && !d.changesId && d.landingId) node.data = { changesId: d.landingId } as GtNode['data']
+    }
     // Belt and braces: files written before settleSession existed, or edited
     // by hand, must still open in a usable state.
     if (node.type === 'session') node.data = settleSession(node.data)
@@ -316,6 +351,16 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
     // those too: the mode is about what the *next* turn does, and a canvas
     // that opens ready to run unattended is the surprise, not the other way.
     planning: data?.planning ?? true,
+    // Off for a canvas saved before worktrees existed: turning it on creates
+    // directories, and a file written by an older build never consented to
+    // that.
+    isolateSpawns: data?.isolateSpawns === true,
+    checkCommand: typeof data?.checkCommand === 'string' ? data.checkCommand : '',
+    // Strings only, and nothing this build cannot enforce: a rule it does not
+    // recognise would read as a guard that is on while nothing checks it.
+    guards: Array.isArray(data?.guards)
+      ? data.guards.filter((g): g is string => typeof g === 'string')
+      : [],
     // Field by field, not spread wholesale: a hand-edited or older file may
     // carry a tier that is no longer offered, and a preference must never put
     // a value the pickers cannot show back into the store.
@@ -323,14 +368,21 @@ export function deserializeCanvas(data: CanvasData | null | undefined): CanvasSn
     // Absent in canvases saved before the panels floated; those open with
     // nothing showing, which is what a canvas that never had them looked like.
     panels: readPanels(data?.panels),
-    plan:
-      data?.plan && Array.isArray(data.plan.steps) && data.plan.steps.length
-        ? {
-            ...data.plan,
-            steps: data.plan.steps.map((st) =>
-              st.state === 'running' ? { ...st, state: 'pending' as const } : st,
-            ),
-          }
-        : null,
+    // A canvas saved before one orchestrator could hold several jobs wrote a
+    // single `plan`; it reads as a list of one. A plan from back then has no
+    // id of its own either, so it is given one here rather than everywhere
+    // downstream having to cope with a plan that cannot be named.
+    plans: [...(data?.plans ?? []), ...(data?.plan ? [data.plan] : [])]
+      .filter((p): p is Plan => !!p && Array.isArray(p.steps) && p.steps.length > 0)
+      .map((p, i) => ({
+        ...p,
+        id: p.id || `plan_restored_${i}`,
+        // A step that was mid-flight when the app closed is pending again: its
+        // agent is gone with the process, and a step stuck on "running" for
+        // ever is worse than one the user has to approve twice.
+        steps: p.steps.map((st) =>
+          st.state === 'running' ? { ...st, state: 'pending' as const } : st,
+        ),
+      })),
   }
 }

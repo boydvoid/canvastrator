@@ -3,7 +3,9 @@ import {
   Bot,
   File,
   Folder,
+  GitBranch,
   GitPullRequestArrow,
+  Radio,
   Plug,
   ScrollText,
   SquareTerminal,
@@ -18,10 +20,12 @@ export type SpawnKind =
   | 'terminal'
   | 'skill'
   | 'mcp'
-  | 'landing'
+  | 'worktree'
+  | 'context'
+  | 'changes'
 
 /**
- * The seven things you can put on a canvas, arranged around where you clicked.
+ * The nine things you can put on a canvas, arranged around where you clicked.
  *
  * A ring rather than a list because the gesture it replaces is "I want a thing
  * *here*" — and a menu that drops down and to the right answers "here" with
@@ -41,7 +45,9 @@ const RING: { kind: SpawnKind; label: string; Icon: typeof Bot }[] = [
   { kind: 'terminal', label: 'Terminal', Icon: SquareTerminal },
   { kind: 'skill', label: 'Skill', Icon: ScrollText },
   { kind: 'mcp', label: 'MCP', Icon: Plug },
-  { kind: 'landing', label: 'Landing', Icon: GitPullRequestArrow },
+  { kind: 'worktree', label: 'Worktree', Icon: GitBranch },
+  { kind: 'context', label: 'Context', Icon: Radio },
+  { kind: 'changes', label: 'Changes', Icon: GitPullRequestArrow },
 ]
 
 /**

@@ -85,7 +85,17 @@ const SURFACES = ['canvas', 'panel', 'surface', 'surface-2']
 
 describe('light palette', () => {
   it('defines every token the theme re-points', () => {
-    for (const name of [...SURFACES, 'fg', 'fg-muted', 'fg-subtle', 'fg-faint', 'live', 'danger']) {
+    for (const name of [
+      ...SURFACES,
+      'fg',
+      'fg-muted',
+      'fg-subtle',
+      'fg-faint',
+      'live',
+      'danger',
+      'work',
+      'attn',
+    ]) {
       expect(light[name], name).toBeDefined()
     }
   })
@@ -103,7 +113,7 @@ describe('light palette', () => {
 
   // Status is carried by colour in this app — a failed agent is red text, a
   // finished one is green — so the status colours are text, not decoration.
-  it.each(['claude', 'codex', 'opencode', 'live', 'danger'])(
+  it.each(['claude', 'codex', 'opencode', 'live', 'danger', 'work', 'attn'])(
     '%s meets WCAG AA as status text on every surface',
     (name) => {
       for (const bg of SURFACES) {

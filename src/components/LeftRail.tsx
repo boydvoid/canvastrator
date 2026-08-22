@@ -1,15 +1,32 @@
 import { useEffect } from 'react'
-import { Activity, Compass, Gauge, GitPullRequestArrow, Layers, Library, Settings, X } from 'lucide-react'
+import {
+  Activity,
+  Compass,
+  Gauge,
+  GitFork,
+  GitPullRequestArrow,
+  Layers,
+  Library,
+  Radio,
+  Settings,
+  Sparkles,
+  X,
+} from 'lucide-react'
 import { CanvasesContent } from '@/components/Sidebar'
-import { DecisionContent } from '@/components/DecisionPanel'
-import { useStore } from '@/lib/store'
+import { RationaleContent } from '@/components/RationalePanel'
+import { useInViewRef, useStore } from '@/lib/store'
 import type { PanelKey, RightTab } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
 /** The drawers, and the buttons that open them. */
 const RAIL = [
   { key: 'canvases', label: 'canvases', Icon: Layers, hint: 'Saved canvases' },
-  { key: 'decisions', label: 'decisions', Icon: Compass, hint: 'Decisions taken on this canvas' },
+  {
+    key: 'rationale',
+    label: 'rationale',
+    Icon: Compass,
+    hint: 'Why the canvas looks the way it does',
+  },
 ] as const satisfies readonly { key: RightTab; label: string; Icon: typeof Layers; hint: string }[]
 
 /**
@@ -26,13 +43,17 @@ const RAIL = [
  */
 const PANELS = [
   { key: 'pulse', label: 'Pulse', Icon: Activity, hint: 'What is going on' },
+  { key: 'decisions', label: 'Decisions', Icon: GitFork, hint: 'What is waiting on you' },
+  { key: 'shared', label: 'Shared context', Icon: Radio, hint: 'What every agent knows' },
+  { key: 'changes', label: 'Changes', Icon: GitPullRequestArrow, hint: 'What has been written' },
   { key: 'usage', label: 'Usage', Icon: Gauge, hint: 'Spend and context' },
+  { key: 'skills', label: 'Skills', Icon: Sparkles, hint: 'What the agents can already do' },
   { key: 'personas', label: 'personas', Icon: Library, hint: 'Reusable agents' },
 ] as const satisfies readonly { key: PanelKey; label: string; Icon: typeof Layers; hint: string }[]
 
 const CONTENT: Partial<Record<RightTab, () => React.ReactElement>> = {
   canvases: CanvasesContent,
-  decisions: DecisionContent,
+  rationale: RationaleContent,
 }
 
 /**
@@ -48,7 +69,8 @@ const CONTENT: Partial<Record<RightTab, () => React.ReactElement>> = {
  * an agent from a persona means seeing where it lands, and that cannot work
  * through a scrim.
  */
-export function LeftRail({ onAddLanding }: { onAddLanding: () => void }) {
+export function LeftRail() {
+  const inView = useInViewRef()
   const open = useStore((s) => s.libraryOpen)
   const panels = useStore((s) => s.panels)
   const togglePanel = useStore((s) => s.togglePanel)
@@ -83,16 +105,21 @@ export function LeftRail({ onAddLanding }: { onAddLanding: () => void }) {
       if (st.canvasDialog || st.openFilePath) return
       toggle()
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, toggle])
+    // The rail is mounted once per open canvas; only the one you are looking
+    // at may act on a chord. See `useInView`.
+    const guarded = (e: KeyboardEvent) => {
+      if (inView.current) onKey(e)
+    }
+    window.addEventListener('keydown', guarded)
+    return () => window.removeEventListener('keydown', guarded)
+  }, [inView, open, toggle])
 
   const Body = CONTENT[tab] ?? CanvasesContent
   const active = RAIL.find((r) => r.key === tab)
 
   return (
     <>
-      <nav className="flex w-[52px] shrink-0 flex-col items-center gap-1 border-r border-line bg-panel py-2.5">
+      <nav className="gt-panel flex w-[52px] shrink-0 flex-col items-center gap-1 rounded-2xl border border-line bg-panel py-2.5">
         {RAIL.map(({ key, Icon, hint }) => {
           const on = open && tab === key
           return (
@@ -136,18 +163,6 @@ export function LeftRail({ onAddLanding }: { onAddLanding: () => void }) {
           )
         })}
 
-        <span className="my-1 h-px w-6 bg-line" />
-
-        {/* Landing is still a node: what changed is a list you read beside the
-            files it names, and it grows past what a corner panel can hold. */}
-        <button
-          title="Put a Landing module on the canvas"
-          onClick={onAddLanding}
-          className="grid h-9 w-9 place-items-center rounded-lg text-fg-subtle transition-colors hover:bg-surface hover:text-fg-muted"
-        >
-          <GitPullRequestArrow size={15} />
-        </button>
-
         <span className="flex-1" />
 
         <button
@@ -163,7 +178,7 @@ export function LeftRail({ onAddLanding }: { onAddLanding: () => void }) {
         // Typing into a drawer must never trip a canvas shortcut.
         <aside
           data-shortcuts="off"
-          className="absolute top-0 bottom-0 left-[52px] z-20 flex w-[300px] flex-col overflow-hidden border-r border-line bg-panel/95 backdrop-blur"
+          className="absolute top-0 bottom-0 left-[58px] z-20 flex w-[300px] flex-col overflow-hidden rounded-xl border border-line bg-panel/95 backdrop-blur"
         >
           <header className="flex shrink-0 items-center gap-2 border-b border-line-soft px-3 py-2">
             <span className="font-mono text-[10px] tracking-[0.14em] text-fg-muted uppercase">

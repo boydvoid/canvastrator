@@ -40,6 +40,15 @@ pub enum AgentEvent {
         detail: String,
         paths: Vec<PathTouch>,
     },
+    /// How full the window is *right now*, from one API call's own usage.
+    ///
+    /// Sent per assistant message rather than once at the end, because the
+    /// end-of-run totals are cumulative: a `--print` run makes one API call
+    /// per tool loop, and summing their prompts counts a cached conversation
+    /// again for every call — tens of millions of tokens against a window that
+    /// holds two hundred thousand. One call's prompt is the conversation's
+    /// actual size; the last one is its current size.
+    Context { tokens: u64 },
     /// Terminal event for a turn that produced an answer.
     Result {
         text: String,

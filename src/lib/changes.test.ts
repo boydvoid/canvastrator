@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { diffStat, statLabel, STAT_BUDGET } from './landing'
+import { diffStat, shortPath, statLabel, STAT_BUDGET } from './changes'
 import type { DiffBase, FilePeek } from './bridge'
 
 const peek = (text: string, over: Partial<FilePeek> = {}): FilePeek => ({
@@ -114,5 +114,28 @@ describe('statLabel', () => {
     expect(statLabel({ path: 'a', added: 9, removed: 0, reason: 'untracked', untracked: true })).toBe(
       '+9 −0',
     )
+  })
+})
+
+describe('shortPath', () => {
+  it('drops the root a canvas is working in', () => {
+    expect(shortPath('/Users/me/dev/app/src/lib/store.ts', '/Users/me/dev/app')).toBe(
+      'src/lib/store.ts',
+    )
+  })
+
+  it('keeps the tail when the file is outside that root', () => {
+    expect(shortPath('/Users/me/other/src/lib/store.ts', '/Users/me/dev/app')).toBe(
+      'src/lib/store.ts',
+    )
+  })
+
+  it('keeps a short path whole', () => {
+    expect(shortPath('/tmp/notes.md')).toBe('tmp/notes.md')
+  })
+
+  it('does not return an empty string for the root itself', () => {
+    // The root has no path inside it, so it falls back to its own tail.
+    expect(shortPath('/Users/me/dev/app', '/Users/me/dev/app')).toBe('me/dev/app')
   })
 })
