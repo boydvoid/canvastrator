@@ -10,6 +10,7 @@ import {
   ScrollText,
   SquareTerminal,
 } from 'lucide-react'
+import { screenLayer } from '@/components/ScreenLayer'
 import { PROVIDER_ACCENT, PROVIDER_LABEL, type Provider } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
@@ -92,7 +93,7 @@ export function SpawnRing({
     }
   }, [onClose])
 
-  return (
+  return screenLayer(
     <div
       ref={ref}
       data-shortcuts="off"
@@ -163,6 +164,6 @@ export function SpawnRing({
       >
         lands where you clicked
       </span>
-    </div>
+    </div>,
   )
 }

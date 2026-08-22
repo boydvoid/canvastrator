@@ -17,6 +17,7 @@ import {
   Sparkles,
   Wand2,
 } from 'lucide-react'
+import { screenLayer } from '@/components/ScreenLayer'
 import { newCanvas, saveCanvas } from '@/lib/canvas'
 import { useStore } from '@/lib/store'
 import { PROVIDER_LABEL, type Provider } from '@/lib/types'
@@ -284,7 +285,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
 
   let group = ''
 
-  return (
+  return screenLayer(
     <div
       data-shortcuts="off"
       className="fixed inset-0 z-50 flex items-start justify-center pt-[16vh]"
@@ -378,6 +379,6 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
           <span className="ml-auto">{matches.length} of {items.length}</span>
         </div>
       </div>
-    </div>
+    </div>,
   )
 }

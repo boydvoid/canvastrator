@@ -176,9 +176,18 @@ export function LeftRail() {
 
       {open && (
         // Typing into a drawer must never trip a canvas shortcut.
+        //
+        // The drawer floats rather than taking a column, so it cannot inherit
+        // the row's `gap-2` the way the rail and the canvas do — it has to be
+        // told where the rail ends. Its offset is the row's own inset plus the
+        // rail's width plus that same gap, on the same spacing scale, so the
+        // ground shows between the rail and the drawer by exactly as much as
+        // it does between the rail and the canvas. It sat two pixels *inside*
+        // the rail's right edge before, which read as one panel with a seam
+        // down it rather than as two.
         <aside
           data-shortcuts="off"
-          className="absolute top-0 bottom-0 left-[58px] z-20 flex w-[300px] flex-col overflow-hidden rounded-xl border border-line bg-panel/95 backdrop-blur"
+          className="absolute top-0 bottom-0 left-[calc(52px+var(--spacing)*4)] z-20 flex w-[300px] flex-col overflow-hidden rounded-xl border border-line bg-panel/95 backdrop-blur"
         >
           <header className="flex shrink-0 items-center gap-2 border-b border-line-soft px-3 py-2">
             <span className="font-mono text-[10px] tracking-[0.14em] text-fg-muted uppercase">
